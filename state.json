@@ -1,0 +1,38 @@
+{
+  "listen_chats": [
+    -1003105654627
+  ],
+  "push_chats": [
+    -1003454089194
+  ],
+  "filters": {
+    "market_cap_usd": {
+      "min": 2000000.0,
+      "max": null
+    },
+    "liquidity_usd": {
+      "min": null,
+      "max": null
+    },
+    "open_minutes": {
+      "min": null,
+      "max": null
+    },
+    "top10_ratio": {
+      "min": null,
+      "max": null
+    },
+    "holder_count": {
+      "min": null,
+      "max": null
+    },
+    "max_holder_ratio": {
+      "min": null,
+      "max": null
+    },
+    "trades_5m": {
+      "min": null,
+      "max": null
+    }
+  }
+}
