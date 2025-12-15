@@ -4,16 +4,19 @@ import asyncio
 import html
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .bot import BotApp, chain_hint
 from .chart import render_chart
+from .client_pool import ClientPool
 from .data_fetcher import DataFetcher
 from .filters import apply_filters
 from .models import TokenMetrics
 from .state import StateStore
 from .storage import DedupeStore
+from .task_scheduler import TaskScheduler
 from .utils import short_num, format_time_ago
 
 
@@ -128,6 +131,9 @@ async def main():
     else:
         logger.warning("⚠️  No admin IDs configured, admin features will be disabled")
     
+    # Tasks config path (for MTProto clients + tasks)
+    tasks_config_path = os.getenv("TASK_CONFIG_PATH", "config/tasks.json")
+    
     state = StateStore("state.json", admin_ids)
     logger.info("💾 State store initialized")
 
@@ -140,7 +146,12 @@ async def main():
     dedupe = DedupeStore()
     logger.info("🔄 Dedupe store initialized (in-memory)")
 
-    bot_app = BotApp(admin_ids, state, process_ca=None)
+    bot_app = BotApp(admin_ids, state, process_ca=None, scheduler=None)
+    client_pool = ClientPool(tasks_config_path)
+    try:
+        await client_pool.load()
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to load clients: {e}")
 
     async def process_ca(chain: str, ca: str, force_push: bool = False) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """
