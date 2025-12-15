@@ -19,19 +19,41 @@ class GMGNBasicFetcher:
     轻量版 GMGN 抓取器，复用 gmgn_complete_fetcher.py 的基础接口逻辑：
     - 仅调用 /api/v1/mutil_window_token_info
     - 兼容秒/毫秒时间戳
-    - 支持重试机制
+    - 支持重试机制和指纹切换
     - 尽量少字段，速度快，适合并行调用
     """
 
     BASE_URL = "https://gmgn.ai"
+    
+    # 可用的浏览器指纹列表（用于重试时切换）
+    FINGERPRINTS = [
+        "chrome_124",
+        "chrome_120",
+        "chrome_116",
+        "firefox_120",
+        "safari_ios_17_0",
+    ]
 
     def __init__(self, extra_headers: Optional[Dict[str, str]] = None):
+        self.fingerprint_index = 0
+        self.extra_headers = extra_headers or {}
+        self._create_session()
+
+    def _create_session(self):
+        """创建新的session，使用当前指纹"""
+        fingerprint = self.FINGERPRINTS[self.fingerprint_index % len(self.FINGERPRINTS)]
         self.session = tls_client.Session(
-            client_identifier="chrome_124",
+            client_identifier=fingerprint,
             random_tls_extension_order=True,
         )
         self.session.timeout_seconds = 20
-        self.extra_headers = extra_headers or {}
+        logger.debug(f"🔄 Created new session with fingerprint: {fingerprint}")
+
+    def _rotate_fingerprint(self):
+        """切换到下一个指纹"""
+        self.fingerprint_index = (self.fingerprint_index + 1) % len(self.FINGERPRINTS)
+        self._create_session()
+        logger.info(f"🔄 Rotated to fingerprint: {self.FINGERPRINTS[self.fingerprint_index]}")
 
     def _headers(self, chain_code: str) -> Dict[str, str]:
         try:
@@ -147,9 +169,8 @@ class GMGNBasicFetcher:
             extra={"source": "gmgn_basic"},
         )
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
-    def _fetch_sync(self, chain: str, address: str) -> Optional[TokenMetrics]:
-        """同步获取，带重试机制"""
+    def _fetch_sync(self, chain: str, address: str, attempt: int = 0) -> Optional[TokenMetrics]:
+        """同步获取，带重试和指纹切换机制"""
         chain_code = "sol" if chain.lower() in ("solana", "sol") else chain.lower()
         url = f"{self.BASE_URL}/api/v1/mutil_window_token_info"
         payload = {"chain": chain_code, "addresses": [address]}
@@ -157,11 +178,21 @@ class GMGNBasicFetcher:
         try:
             resp = self.session.post(url, json=payload, headers=self._headers(chain_code))
             if resp.status_code != 200:
-                logger.warning(f"GMGN basic API returned {resp.status_code} for {address[:8]}")
+                logger.warning(f"GMGN basic API returned {resp.status_code} for {address[:8]} (attempt {attempt + 1})")
+                # 如果是403/429等错误，切换指纹重试
+                if resp.status_code in (403, 429, 401) and attempt < len(self.FINGERPRINTS) - 1:
+                    logger.info(f"🔄 Switching fingerprint due to HTTP {resp.status_code}")
+                    self._rotate_fingerprint()
+                    return self._fetch_sync(chain, address, attempt + 1)
                 return None
             data = resp.json()
             if data.get("code") != 0 or not data.get("data"):
-                logger.debug(f"GMGN basic API error: code={data.get('code')}, msg={data.get('msg')}")
+                logger.debug(f"GMGN basic API error: code={data.get('code')}, msg={data.get('msg')} (attempt {attempt + 1})")
+                # 如果API返回错误码，也尝试切换指纹
+                if attempt < len(self.FINGERPRINTS) - 1:
+                    logger.info(f"🔄 Switching fingerprint due to API error code={data.get('code')}")
+                    self._rotate_fingerprint()
+                    return self._fetch_sync(chain, address, attempt + 1)
                 return None
             basic = data["data"][0]
             # 提取 pairAddress 用于图表
@@ -180,8 +211,14 @@ class GMGNBasicFetcher:
                 logger.warning(f"⚠️ Failed to extract pairAddress from GMGN basic info")
             return metrics
         except Exception as e:
-            logger.warning(f"GMGN basic fetch error for {address[:8]}: {e}")
-            raise  # 让 retry 机制处理
+            logger.warning(f"GMGN basic fetch error for {address[:8]}: {e} (attempt {attempt + 1})")
+            # 如果是网络错误或异常，尝试切换指纹重试
+            if attempt < len(self.FINGERPRINTS) - 1:
+                logger.info(f"🔄 Switching fingerprint due to exception: {type(e).__name__}")
+                self._rotate_fingerprint()
+                return self._fetch_sync(chain, address, attempt + 1)
+            # 最后一次尝试失败，返回None
+            return None
 
     async def fetch(self, chain: str, address: str) -> Optional[TokenMetrics]:
         """异步包装，避免阻塞事件循环"""

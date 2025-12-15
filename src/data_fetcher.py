@@ -259,8 +259,11 @@ class DataFetcher:
         
         return headers
 
-    async def _fetch_gmgn_token_info(self, chain: str, address: str) -> Optional[Dict[str, Any]]:
+    async def _fetch_gmgn_token_info(self, chain: str, address: str, attempt: int = 0) -> Optional[Dict[str, Any]]:
         """请求主接口：/defi/quotation/v1/tokens/sol/{address} - 获取价格、市值等"""
+        # 可用的浏览器指纹列表（用于重试时切换）
+        fingerprints = ["chrome110", "chrome120", "chrome116", "safari15_3", "safari15_5"]
+        
         chain_code = "sol" if chain.lower() == "solana" else "eth"
         if chain.lower() == "bsc":
             chain_code = "bsc"
@@ -269,13 +272,14 @@ class DataFetcher:
         headers = self._get_gmgn_headers(f"/{chain_code}/token/{address}")
         
         try:
-            # 关键：使用 curl_cffi 的 chrome110 绕过 Cloudflare
-            logger.info(f"🔐 Fetching GMGN token info: {url}")
+            # 使用 curl_cffi 的指纹绕过 Cloudflare，失败时切换指纹
+            fingerprint = fingerprints[attempt % len(fingerprints)]
+            logger.info(f"🔐 Fetching GMGN token info: {url} (attempt {attempt + 1}, fingerprint: {fingerprint})")
             resp = await asyncio.to_thread(
                 curl_requests.get,
                 url,
                 headers=headers,
-                impersonate="chrome110",
+                impersonate=fingerprint,
                 timeout=10
             )
             
@@ -295,20 +299,41 @@ class DataFetcher:
                 else:
                     logger.warning(f"⚠️  GMGN API error: code={data.get('code')}, msg={data.get('msg')}")
             elif resp.status_code == 403:
-                logger.warning(f"🚫 GMGN Token Info 403 Blocked (IP/UA issues)")
+                logger.warning(f"🚫 GMGN Token Info 403 Blocked (attempt {attempt + 1})")
                 logger.debug(f"Response preview: {resp.text[:200]}")
+                # 403错误，切换指纹重试
+                if attempt < len(fingerprints) - 1:
+                    logger.info(f"🔄 Switching fingerprint due to 403")
+                    return await self._fetch_gmgn_token_info(chain, address, attempt + 1)
+            elif resp.status_code == 429:
+                logger.warning(f"🚫 GMGN Token Info 429 Rate Limit (attempt {attempt + 1})")
+                # 429错误，切换指纹重试
+                if attempt < len(fingerprints) - 1:
+                    logger.info(f"🔄 Switching fingerprint due to 429")
+                    return await self._fetch_gmgn_token_info(chain, address, attempt + 1)
             else:
-                logger.warning(f"⚠️  GMGN Token Info HTTP {resp.status_code}")
+                logger.warning(f"⚠️  GMGN Token Info HTTP {resp.status_code} (attempt {attempt + 1})")
+                # 其他错误也尝试切换指纹
+                if resp.status_code >= 400 and attempt < len(fingerprints) - 1:
+                    logger.info(f"🔄 Switching fingerprint due to HTTP {resp.status_code}")
+                    return await self._fetch_gmgn_token_info(chain, address, attempt + 1)
         except Exception as e:
-            logger.warning(f"❌ GMGN Token Info Error: {type(e).__name__}: {e}")
+            logger.warning(f"❌ GMGN Token Info Error: {type(e).__name__}: {e} (attempt {attempt + 1})")
+            # 异常时也尝试切换指纹重试
+            if attempt < len(fingerprints) - 1:
+                logger.info(f"🔄 Switching fingerprint due to exception")
+                return await self._fetch_gmgn_token_info(chain, address, attempt + 1)
         
         return None
     
-    async def _fetch_gmgn_basic_info(self, chain: str, address: str) -> Optional[Dict[str, Any]]:
+    async def _fetch_gmgn_basic_info(self, chain: str, address: str, attempt: int = 0) -> Optional[Dict[str, Any]]:
         """
         备用方案：获取基础信息（你已经能获取到的接口）
         接口: /api/v1/mutil_window_token_info
         """
+        # 可用的浏览器指纹列表（用于重试时切换）
+        fingerprints = ["chrome110", "chrome120", "chrome116", "safari15_3", "safari15_5"]
+        
         chain_code = "sol" if chain.lower() == "solana" else "eth"
         if chain.lower() == "bsc":
             chain_code = "bsc"
@@ -320,13 +345,14 @@ class DataFetcher:
         payload = {"chain": chain_code, "addresses": [address]}
         
         try:
-            logger.info(f"🔐 Fetching GMGN basic info (backup): {url}")
+            fingerprint = fingerprints[attempt % len(fingerprints)]
+            logger.info(f"🔐 Fetching GMGN basic info (backup): {url} (attempt {attempt + 1}, fingerprint: {fingerprint})")
             resp = await asyncio.to_thread(
                 curl_requests.post,
                 url,
                 headers=headers,
                 json=payload,
-                impersonate="chrome110",
+                impersonate=fingerprint,
                 timeout=10
             )
             
@@ -339,13 +365,31 @@ class DataFetcher:
                     if basic_info:
                         logger.info(f"✅ GMGN basic info (backup) fetched: {basic_info.get('symbol', 'N/A')}")
                         return basic_info
+                else:
+                    # API返回错误，尝试切换指纹重试
+                    if attempt < len(fingerprints) - 1:
+                        logger.info(f"🔄 Switching fingerprint due to API error code={data.get('code')}")
+                        return await self._fetch_gmgn_basic_info(chain, address, attempt + 1)
+            elif resp.status_code in (403, 429, 401):
+                logger.warning(f"🚫 GMGN Basic Info HTTP {resp.status_code} (attempt {attempt + 1})")
+                # 403/429错误，切换指纹重试
+                if attempt < len(fingerprints) - 1:
+                    logger.info(f"🔄 Switching fingerprint due to HTTP {resp.status_code}")
+                    return await self._fetch_gmgn_basic_info(chain, address, attempt + 1)
         except Exception as e:
-            logger.debug(f"❌ GMGN Basic Info Error: {e}")
+            logger.debug(f"❌ GMGN Basic Info Error: {e} (attempt {attempt + 1})")
+            # 异常时也尝试切换指纹重试
+            if attempt < len(fingerprints) - 1:
+                logger.info(f"🔄 Switching fingerprint due to exception")
+                return await self._fetch_gmgn_basic_info(chain, address, attempt + 1)
         
         return None
 
-    async def _fetch_gmgn_top_holders(self, chain: str, address: str) -> Optional[Dict[str, Any]]:
+    async def _fetch_gmgn_top_holders(self, chain: str, address: str, attempt: int = 0) -> Optional[Dict[str, Any]]:
         """请求持仓接口：/vas/api/v1/token_holders/sol/{address} - 获取精确的 Top10 和 Max Holder（参考 Dragon）"""
+        # 可用的浏览器指纹列表（用于重试时切换）
+        fingerprints = ["chrome110", "chrome120", "chrome116", "safari15_3", "safari15_5"]
+        
         chain_code = "sol" if chain.lower() == "solana" else "eth"
         if chain.lower() == "bsc":
             chain_code = "bsc"
@@ -356,12 +400,14 @@ class DataFetcher:
         headers = self._get_gmgn_headers(f"/{chain_code}/token/{address}")
         
         try:
+            fingerprint = fingerprints[attempt % len(fingerprints)]
+            logger.debug(f"🔐 Fetching GMGN top holders (attempt {attempt + 1}, fingerprint: {fingerprint})")
             resp = await asyncio.to_thread(
                 curl_requests.get,
                 url,
                 params=params,
                 headers=headers,
-                impersonate="chrome110",
+                impersonate=fingerprint,
                 timeout=10
             )
             
@@ -394,8 +440,29 @@ class DataFetcher:
                         "top_10_ratio": top10_sum,
                         "max_holder_ratio": max_holder
                     }
+                else:
+                    # 没有数据，尝试切换指纹重试
+                    if attempt < len(fingerprints) - 1:
+                        logger.info(f"🔄 Switching fingerprint due to empty data")
+                        return await self._fetch_gmgn_top_holders(chain, address, attempt + 1)
+            elif resp.status_code in (403, 429, 401):
+                logger.warning(f"🚫 GMGN Top Holders HTTP {resp.status_code} (attempt {attempt + 1})")
+                # 403/429错误，切换指纹重试
+                if attempt < len(fingerprints) - 1:
+                    logger.info(f"🔄 Switching fingerprint due to HTTP {resp.status_code}")
+                    return await self._fetch_gmgn_top_holders(chain, address, attempt + 1)
+            else:
+                logger.warning(f"⚠️  GMGN Top Holders HTTP {resp.status_code} (attempt {attempt + 1})")
+                # 其他错误也尝试切换指纹
+                if resp.status_code >= 400 and attempt < len(fingerprints) - 1:
+                    logger.info(f"🔄 Switching fingerprint due to HTTP {resp.status_code}")
+                    return await self._fetch_gmgn_top_holders(chain, address, attempt + 1)
         except Exception as e:
-            logger.debug(f"❌ GMGN Top Holders Error: {e}")
+            logger.debug(f"❌ GMGN Top Holders Error: {e} (attempt {attempt + 1})")
+            # 异常时也尝试切换指纹重试
+            if attempt < len(fingerprints) - 1:
+                logger.info(f"🔄 Switching fingerprint due to exception")
+                return await self._fetch_gmgn_top_holders(chain, address, attempt + 1)
         
         return None
 
