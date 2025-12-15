@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 from pathlib import Path
@@ -230,7 +231,9 @@ async def main():
         # If force_push (manual query), always return result to user
         if force_push:
             if not passed:
-                error_msg = f"代币未通过筛选条件：\n" + "\n".join(f"• {r}" for r in reasons)
+                # 转义 HTML 特殊字符，避免解析错误
+                escaped_reasons = [html.escape(r) for r in reasons]
+                error_msg = f"代币未通过筛选条件：\n" + "\n".join(f"• {r}" for r in escaped_reasons)
                 return photo_buffer, caption, error_msg
             # Return photo and caption for manual query (even if no push targets)
             return photo_buffer, caption, None

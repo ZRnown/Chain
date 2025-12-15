@@ -168,7 +168,9 @@ class BotApp:
         text += f"👥 **监听群组** ({len(listen_chats)}个)\n"
         if listen_chats:
             for chat_id in listen_chats:
-                text += f"• `{chat_id}`\n"
+                chat_info = await self._get_chat_info(chat_id)
+                chat_name = chat_info.get('title', f'群组 {chat_id}') if chat_info else f'群组 {chat_id}'
+                text += f"• **{chat_name}** (`{chat_id}`)\n"
         else:
             text += "• 暂无\n"
         text += "\n"
@@ -178,7 +180,9 @@ class BotApp:
         text += f"📤 **推送群组** ({len(push_chats)}个)\n"
         if push_chats:
             for chat_id in push_chats:
-                text += f"• `{chat_id}`\n"
+                chat_info = await self._get_chat_info(chat_id)
+                chat_name = chat_info.get('title', f'群组 {chat_id}') if chat_info else f'群组 {chat_id}'
+                text += f"• **{chat_name}** (`{chat_id}`)\n"
         else:
             text += "• 暂无\n"
         text += "\n"
@@ -258,8 +262,10 @@ class BotApp:
             return
         text = f"📋 **监听群组列表** ({len(listen_chats)}个)\n\n"
         for idx, chat_id in enumerate(listen_chats, 1):
-            text += f"{idx}. `{chat_id}`\n"
-        text += "\n💡 使用 `/del_listen <chat_id>` 删除"
+            chat_info = await self._get_chat_info(chat_id)
+            chat_name = chat_info.get('title', f'群组 {chat_id}') if chat_info else f'群组 {chat_id}'
+            text += f"{idx}. **{chat_name}**\n   ID: `{chat_id}`\n\n"
+        text += "💡 使用 `/del_listen <chat_id>` 删除"
         await update.message.reply_text(text, parse_mode="Markdown")
 
     async def cmd_add_push(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -311,8 +317,10 @@ class BotApp:
             return
         text = f"📋 **推送群组列表** ({len(push_chats)}个)\n\n"
         for idx, chat_id in enumerate(push_chats, 1):
-            text += f"{idx}. `{chat_id}`\n"
-        text += "\n💡 使用 `/del_push <chat_id>` 删除"
+            chat_info = await self._get_chat_info(chat_id)
+            chat_name = chat_info.get('title', f'群组 {chat_id}') if chat_info else f'群组 {chat_id}'
+            text += f"{idx}. **{chat_name}**\n   ID: `{chat_id}`\n\n"
+        text += "💡 使用 `/del_push <chat_id>` 删除"
         await update.message.reply_text(text, parse_mode="Markdown")
 
     async def cmd_set_filter(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -747,7 +755,7 @@ class BotApp:
         text = self._format_filters(filters_cfg)
         await query.edit_message_text(text, parse_mode="Markdown")
     
-    def _format_settings(self, snap):
+    async def _format_settings(self, snap):
         """格式化配置信息"""
         text = "⚙️ **当前配置**\n\n"
         
@@ -755,7 +763,9 @@ class BotApp:
         text += f"👥 **监听群组** ({len(listen_chats)}个)\n"
         if listen_chats:
             for chat_id in listen_chats:
-                text += f"• `{chat_id}`\n"
+                chat_info = await self._get_chat_info(chat_id)
+                chat_name = chat_info.get('title', f'群组 {chat_id}') if chat_info else f'群组 {chat_id}'
+                text += f"• **{chat_name}** (`{chat_id}`)\n"
         else:
             text += "• 暂无\n"
         text += "\n"
@@ -764,7 +774,9 @@ class BotApp:
         text += f"📤 **推送群组** ({len(push_chats)}个)\n"
         if push_chats:
             for chat_id in push_chats:
-                text += f"• `{chat_id}`\n"
+                chat_info = await self._get_chat_info(chat_id)
+                chat_name = chat_info.get('title', f'群组 {chat_id}') if chat_info else f'群组 {chat_id}'
+                text += f"• **{chat_name}** (`{chat_id}`)\n"
         else:
             text += "• 暂无\n"
         text += "\n"
