@@ -68,10 +68,33 @@ class TaskScheduler:
     def list_tasks(self) -> List[Dict[str, Any]]:
         return self.tasks
 
+    def add_task(self, task: Dict[str, Any]) -> bool:
+        if any(t["id"] == task["id"] for t in self.tasks):
+            return False
+        now = time.time()
+        task["next_run"] = now
+        self.tasks.append(task)
+        # 同步写回配置
+        cfg_tasks = []
+        for t in self.tasks:
+            cfg_tasks.append({
+                "id": t["id"],
+                "name": t.get("name"),
+                "client": t.get("client"),
+                "chain": t.get("chain"),
+                "ca": t.get("ca"),
+                "targets": t.get("targets", []),
+                "interval_minutes": t.get("interval_minutes", 5),
+                "enabled": t.get("enabled", True),
+            })
+        self.client_pool.update_tasks_config(cfg_tasks)
+        return True
+
     def pause(self, task_id: str) -> bool:
         for t in self.tasks:
             if t["id"] == task_id:
                 t["enabled"] = False
+                self.client_pool.update_tasks_config(self.tasks)
                 return True
         return False
 
@@ -81,6 +104,7 @@ class TaskScheduler:
             if t["id"] == task_id:
                 t["enabled"] = True
                 t["next_run"] = now
+                self.client_pool.update_tasks_config(self.tasks)
                 return True
         return False
 
@@ -108,29 +132,40 @@ class TaskScheduler:
 
         logger.info(f"▶️ Task {task['id']} running: {chain} {ca[:8]}..., targets={len(targets)}")
         try:
-            photo, caption, error_msg = await self.process_ca(chain, ca, True)
+            photo, caption, error_msg = await self.process_ca(chain, ca, True, task_id=task.get("id"))
             if error_msg:
                 msg = f"❌ 任务 {task['name']} 失败：{error_msg}"
-                await self._send_to_targets(client, targets, text=msg)
+                await self._send_to_targets(client, targets, text=msg, ca=ca)
                 return
             if not caption:
-                await self._send_to_targets(client, targets, text=f"❌ 任务 {task['name']} 无返回数据")
+                await self._send_to_targets(client, targets, text=f"❌ 任务 {task['name']} 无返回数据", ca=ca)
                 return
-            await self._send_to_targets(client, targets, text=caption, photo=photo)
+            await self._send_to_targets(client, targets, text=caption, photo=photo, ca=ca)
             logger.info(f"✅ Task {task['id']} sent to {len(targets)} targets")
         except Exception as e:
             logger.warning(f"⚠️ Task {task['id']} error: {e}")
 
-    async def _send_to_targets(self, client, targets: List[Any], text: Optional[str] = None, photo=None):
+    async def _send_to_targets(self, client, targets: List[Any], text: Optional[str] = None, photo=None, ca: Optional[str] = None):
         for target in targets:
             try:
-                if photo:
-                    if hasattr(photo, "seek"):
-                        photo.seek(0)
-                    await client.send_file(target, photo, caption=text or "", parse_mode="html")
+                is_bot = isinstance(target, str) and target.startswith("@")
+                if is_bot:
+                    # 对机器人仅发送 CA（若提供），否则发送文本
+                    payload = ca or text or ""
+                    if photo:
+                        if hasattr(photo, "seek"):
+                            photo.seek(0)
+                        await client.send_file(target, photo, caption=payload, parse_mode="html")
+                    else:
+                        await client.send_message(target, payload, parse_mode="html")
                 else:
-                    if text:
-                        await client.send_message(target, text, parse_mode="html")
+                    if photo:
+                        if hasattr(photo, "seek"):
+                            photo.seek(0)
+                        await client.send_file(target, photo, caption=text or "", parse_mode="html")
+                    else:
+                        if text:
+                            await client.send_message(target, text, parse_mode="html")
             except RPCError as e:
                 logger.warning(f"⚠️ Send failed to {target}: {e}")
             except Exception as e:

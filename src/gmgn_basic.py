@@ -125,6 +125,10 @@ class GMGNBasicFetcher:
         ts_candidates = [
             basic.get("open_timestamp"),
             basic.get("launch_time"),
+            # 优先使用池子创建时间，避免“打满”时间偏移
+            pool_obj.get("pool_created_at") if isinstance(pool_obj, dict) else None,
+            pool_obj.get("pair_created_at") if isinstance(pool_obj, dict) else None,
+            pool_obj.get("created_at") if isinstance(pool_obj, dict) else None,
             pool_obj.get("open_timestamp") if isinstance(pool_obj, dict) else None,
             price_obj.get("open_timestamp") if isinstance(price_obj, dict) else None,
         ]

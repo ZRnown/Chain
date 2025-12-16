@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from .models import FilterConfig, FilterRange
 
@@ -39,10 +39,12 @@ class StateStore:
     def __init__(self, path: str | Path, admin_ids: List[int]):
         self.path = Path(path)
         self.lock = asyncio.Lock()
+        # 多任务配置：
+        # - current_task: 当前选中的任务ID
+        # - tasks: {task_id: {"enabled": bool, "listen_chats": [], "push_chats": [], "filters": {...}}}
         self._state = {
-            "listen_chats": [],
-            "push_chats": [],
-            "filters": _filters_to_dict(FilterConfig()),
+            "current_task": None,
+            "tasks": {},
         }
         self._load_existing()
 
@@ -50,7 +52,32 @@ class StateStore:
         if self.path.exists():
             try:
                 data = json.loads(self.path.read_text())
-                self._state.update(data)
+                # 迁移旧版结构（无 tasks）
+                if "tasks" not in data:
+                    legacy_listen = data.get("listen_chats", [])
+                    legacy_push = data.get("push_chats", [])
+                    legacy_filters = data.get("filters", _filters_to_dict(FilterConfig()))
+                    self._state["tasks"] = {
+                        "default": {
+                            "enabled": True,
+                            "listen_chats": legacy_listen,
+                            "push_chats": legacy_push,
+                            "filters": legacy_filters,
+                        }
+                    }
+                    self._state["current_task"] = "default" if legacy_listen or legacy_push else None
+                else:
+                    # 确保 enabled 字段存在
+                    tasks = data.get("tasks", {})
+                    for tid, cfg in tasks.items():
+                        cfg.setdefault("enabled", False)
+                        cfg.setdefault("listen_chats", [])
+                        cfg.setdefault("push_chats", [])
+                        cfg.setdefault("filters", _filters_to_dict(FilterConfig()))
+                    self._state.update(data)
+                    # 如果没有 current_task，则选第一个
+                    if not self._state.get("current_task") and tasks:
+                        self._state["current_task"] = list(tasks.keys())[0]
             except Exception:
                 # ignore corrupt state; keep defaults
                 pass
@@ -66,40 +93,130 @@ class StateStore:
         async with self.lock:
             return json.loads(json.dumps(self._state))
 
-    async def add_listen(self, chat_id: int):
+    # --- 任务级别存取 ---
+    def _ensure_task(self, task_id: str):
+        if task_id not in self._state["tasks"]:
+            self._state["tasks"][task_id] = {
+                "enabled": False,
+                "listen_chats": [],
+                "push_chats": [],
+                "filters": _filters_to_dict(FilterConfig()),
+            }
+
+    async def create_task(self, task_id: str) -> bool:
         async with self.lock:
-            if chat_id not in self._state["listen_chats"]:
-                self._state["listen_chats"].append(chat_id)
+            if task_id in self._state["tasks"]:
+                return False
+            self._ensure_task(task_id)
+            # 新任务默认暂停
+            self._state["tasks"][task_id]["enabled"] = False
+            if not self._state.get("current_task"):
+                self._state["current_task"] = task_id
+            await self._write()
+            return True
+
+    async def delete_task(self, task_id: str) -> bool:
+        async with self.lock:
+            if task_id in self._state["tasks"]:
+                self._state["tasks"].pop(task_id, None)
+                if self._state.get("current_task") == task_id:
+                    self._state["current_task"] = None
+                await self._write()
+                return True
+            return False
+
+    async def set_task_enabled(self, task_id: str, enabled: bool) -> bool:
+        async with self.lock:
+            if task_id not in self._state["tasks"]:
+                return False
+            self._state["tasks"][task_id]["enabled"] = enabled
+            await self._write()
+            return True
+
+    async def set_current_task(self, task_id: Optional[str]):
+        async with self.lock:
+            self._state["current_task"] = task_id
+            if task_id:
+                self._ensure_task(task_id)
             await self._write()
 
-    async def del_listen(self, chat_id: int):
+    async def current_task(self) -> Optional[str]:
         async with self.lock:
-            if chat_id in self._state["listen_chats"]:
-                self._state["listen_chats"].remove(chat_id)
+            return self._state.get("current_task")
+
+    async def task_settings(self, task_id: str) -> Dict[str, Any]:
+        async with self.lock:
+            self._ensure_task(task_id)
+            return json.loads(json.dumps(self._state["tasks"][task_id]))
+
+    async def all_tasks(self) -> Dict[str, Any]:
+        async with self.lock:
+            return json.loads(json.dumps(self._state["tasks"]))
+
+    # --- 监听群组 ---
+    async def add_listen(self, chat_id: Union[int, str], task_id: Optional[str] = None):
+        async with self.lock:
+            task_id = task_id or self._state.get("current_task")
+            if not task_id:
+                return
+            self._ensure_task(task_id)
+            task = self._state["tasks"][task_id]
+            if chat_id not in task["listen_chats"]:
+                task["listen_chats"].append(chat_id)
             await self._write()
 
-    async def add_push(self, chat_id: int):
+    async def del_listen(self, chat_id: Union[int, str], task_id: Optional[str] = None):
         async with self.lock:
-            if chat_id not in self._state["push_chats"]:
-                self._state["push_chats"].append(chat_id)
+            task_id = task_id or self._state.get("current_task")
+            if not task_id:
+                return
+            self._ensure_task(task_id)
+            task = self._state["tasks"][task_id]
+            if chat_id in task["listen_chats"]:
+                task["listen_chats"].remove(chat_id)
             await self._write()
 
-    async def del_push(self, chat_id: int):
+    # --- 推送目标 ---
+    async def add_push(self, chat_id: Union[int, str], task_id: Optional[str] = None):
         async with self.lock:
-            if chat_id in self._state["push_chats"]:
-                self._state["push_chats"].remove(chat_id)
+            task_id = task_id or self._state.get("current_task")
+            if not task_id:
+                return
+            self._ensure_task(task_id)
+            task = self._state["tasks"][task_id]
+            if chat_id not in task["push_chats"]:
+                task["push_chats"].append(chat_id)
             await self._write()
 
-    async def set_filter(self, name: str, min_val: Optional[float], max_val: Optional[float]):
+    async def del_push(self, chat_id: Union[int, str], task_id: Optional[str] = None):
         async with self.lock:
-            filters = self._state["filters"]
+            task_id = task_id or self._state.get("current_task")
+            if not task_id:
+                return
+            self._ensure_task(task_id)
+            task = self._state["tasks"][task_id]
+            if chat_id in task["push_chats"]:
+                task["push_chats"].remove(chat_id)
+            await self._write()
+
+    # --- 筛选条件 ---
+    async def set_filter(self, name: str, min_val: Optional[float], max_val: Optional[float], task_id: Optional[str] = None):
+        async with self.lock:
+            task_id = task_id or self._state.get("current_task")
+            if not task_id:
+                return
+            self._ensure_task(task_id)
+            filters = self._state["tasks"][task_id]["filters"]
             if name not in filters:
                 raise ValueError("unknown filter")
             filters[name] = {"min": min_val, "max": max_val}
             await self._write()
 
-    async def filters_cfg(self) -> FilterConfig:
-        snap = await self.snapshot()
-        return _filters_from_dict(snap["filters"])
+    async def filters_cfg(self, task_id: Optional[str] = None) -> FilterConfig:
+        async with self.lock:
+            task_id = task_id or self._state.get("current_task")
+            if not task_id or task_id not in self._state["tasks"]:
+                return _filters_from_dict(_filters_to_dict(FilterConfig()))
+            return _filters_from_dict(self._state["tasks"][task_id]["filters"])
 
 

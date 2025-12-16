@@ -1,0 +1,20 @@
+{
+  "clients": [
+    {
+      "name": "client2",
+      "session": "1BVtsOJgBu4RqPxpuWkvrbCRlF3Mer__wX5W7sY6wqJW0EzJPuQEpFvHmVRDtFLfNQDONKVnmKrlxqva_K2XKV7EiqQ7yDhWOcUR7fyfBT3Onyme_1xG_3brAArpD1oQ5FpZZS0HLoNYMWrz_MkZ7rZKNXrK2kkeGAITFw2xTB208AUltD3aQeFgqzXgHLrJlhQotN5C3YgnrqupDH5OOCf4n4NjAz_iGG5WiaoFcK4MzzONSAS32idxR5w6Zjf47sLDG19evhJ6uU532XrTwvD6I0JpKh7zv9O6yLQjZ2VeEl69BPoh_oJFlJakNKZF_3BmqDwfWj3m45_2CvhBvfhRZ_y0Etds="
+    }
+  ],
+  "tasks": [
+    {
+      "id": "task1",
+      "name": "demo",
+      "client": "client1",
+      "chain": "solana",
+      "ca": "YOUR_CA_ADDRESS",
+      "targets": [],
+      "interval_minutes": 5,
+      "enabled": false
+    }
+  ]
+}

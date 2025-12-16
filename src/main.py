@@ -57,16 +57,13 @@ def build_caption(m: TokenMetrics, filtered: Optional[List[str]] = None) -> str:
     # 第二行：CA (单行方便复制)
     line2 = f"<code>{m.address}</code>"
     
-    # 第三行：持有 | 前10
-    line3 = f"👥持有: {fmt_int(m.holders)} | 🔟Top10: {fmt_pct(m.top10_ratio)}"
-    
-    # 第四行：5分交易 | 最大持仓
-    line4 = f"📉5m交易: {tx_5m} | 🐳最大: {fmt_pct(m.max_holder_ratio)}"
+    # 第三行：持有 | 前10 | 5分交易 | 最大持仓
+    line3 = f"👥持有: {fmt_int(m.holders)} | 🔟Top10: {fmt_pct(m.top10_ratio)} | 📉5m交易: {tx_5m} | 🐳最大: {fmt_pct(m.max_holder_ratio)}"
     
     # 底部：链接
-    line5 = f"🔗 <a href='{gmgn_url}'>点击前往 GMGN 查看详情 ↗️</a>"
+    line4 = f"🔗 <a href='{gmgn_url}'>点击前往 GMGN 查看详情 ↗️</a>"
     
-    content = [title_line, line1, line2, line3, line4, "-"*20, line5]
+    content = [title_line, line1, line2, line3, "-"*20, line4]
     
     if filtered:
         content.append(f"\n🚫 <b>已过滤原因:</b> {', '.join(filtered)}")
@@ -153,18 +150,28 @@ async def main():
     except Exception as e:
         logger.warning(f"⚠️ Failed to load clients: {e}")
 
-    async def process_ca(chain: str, ca: str, force_push: bool = False) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    async def process_ca(chain: str, ca: str, force_push: bool = False, task_id: Optional[str] = None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """
         Process CA and return (photo_path, caption, error_message).
         If successful, returns (photo_path, caption, None).
         If failed, returns (None, None, error_message).
+        task_id: 用于按任务独立的过滤与推送配置；若为 None 则使用当前任务或默认空配置。
         """
-        key = f"{chain}:{ca}"
-        logger.info(f"🔍 Processing CA: {chain} - {ca[:8]}...")
+        # 选择任务配置
+        task_id_in_use = task_id or await state.current_task()
+        tasks_snap = await state.all_tasks()
+        task_cfg = tasks_snap.get(task_id_in_use) if tasks_snap else None
+
+        key = f"{task_id_in_use or 'global'}:{chain}:{ca}"
+        logger.info(f"🔍 Processing CA: {chain} - {ca[:8]}... (task={task_id_in_use})")
         
-        if not force_push and await dedupe.seen(key):
-            logger.debug(f"⏭️  CA already processed, skipping: {ca[:8]}...")
-            return None, None, None  # Already processed, skip silently
+        if not force_push:
+            logger.debug(f"🔍 Checking dedupe for: {key[:64]}...")
+            is_seen = await dedupe.seen(key)
+            logger.debug(f"🔍 Dedupe check result: {is_seen}")
+            if is_seen:
+                logger.info(f"⏭️  CA already processed for task={task_id_in_use}, skipping: {ca[:8]}...")
+                return None, None, None  # Already processed, skip silently
         
         try:
             logger.info(f"📥 Fetching data for {chain} - {ca[:8]}...")
@@ -187,7 +194,7 @@ async def main():
             logger.info(f"📈 Chart data: {len(bars)} bars from Birdeye API")
             
             # 过滤检查
-            filters_cfg = await state.filters_cfg()
+            filters_cfg = await state.filters_cfg(task_id=task_id_in_use)
             passed, reasons = apply_filters(metrics, filters_cfg)
             logger.info(f"🔍 Filter check: {'✅ PASSED' if passed else '❌ FAILED'}")
             if reasons:
@@ -251,29 +258,61 @@ async def main():
         
         # Auto mode: only push if passed filters
         if passed:
-            snap = await state.snapshot()
-            targets = snap["push_chats"]
+            targets = []
+            if task_cfg:
+                targets = task_cfg.get("push_chats", [])
             logger.info(f"📤 Pushing to {len(targets)} target(s): {targets}")
             if targets:
+                # 获取一个可用的 MTProto 客户端（用于发送到机器人）
+                mtproto_client = None
+                if client_pool.clients:
+                    # 使用第一个可用的客户端
+                    mtproto_client = list(client_pool.clients.values())[0]
+                
                 for chat_id in targets:
                     try:
-                        if photo_buffer:
-                            # 直接使用内存中的图片数据
-                            photo_buffer.seek(0)  # 确保指针在开头
-                            await bot_app.app.bot.send_photo(
-                                chat_id=chat_id, 
-                                photo=photo_buffer, 
-                                caption=caption,
-                                parse_mode="HTML"
-                            )
-                            logger.info(f"✅ Photo sent to chat {chat_id}")
+                        # 判断是机器人（@username）还是群组/频道（数字ID）
+                        is_bot = isinstance(chat_id, str) and chat_id.startswith("@")
+                        
+                        if is_bot:
+                            # 机器人：使用 MTProto 客户端
+                            if not mtproto_client:
+                                logger.warning(f"⚠️  No MTProto client available, cannot send to bot {chat_id}")
+                                continue
+                            
+                            payload = ca  # 对机器人仅发送 CA 地址
+                            if photo_buffer:
+                                photo_buffer.seek(0)
+                                await mtproto_client.send_file(
+                                    chat_id, 
+                                    photo_buffer, 
+                                    caption=payload,
+                                    parse_mode="html"
+                                )
+                            else:
+                                await mtproto_client.send_message(
+                                    chat_id, 
+                                    payload,
+                                    parse_mode="html"
+                                )
+                            logger.info(f"✅ Sent to bot {chat_id} via MTProto")
                         else:
-                            await bot_app.app.bot.send_message(
-                                chat_id=chat_id, 
-                                text=caption,
-                                parse_mode="HTML"
-                            )
-                            logger.info(f"✅ Message sent to chat {chat_id}")
+                            # 群组/频道：使用 Bot API
+                            if photo_buffer:
+                                photo_buffer.seek(0)
+                                await bot_app.app.bot.send_photo(
+                                    chat_id=chat_id, 
+                                    photo=photo_buffer, 
+                                    caption=caption,
+                                    parse_mode="HTML"
+                                )
+                            else:
+                                await bot_app.app.bot.send_message(
+                                    chat_id=chat_id, 
+                                    text=caption,
+                                    parse_mode="HTML"
+                                )
+                            logger.info(f"✅ Sent to chat {chat_id} via Bot API")
                     except Exception as e:
                         logger.error(f"❌ Failed to send to chat {chat_id}: {e}")
             else:
@@ -285,6 +324,16 @@ async def main():
 
     # inject process_ca now that it is defined
     bot_app.process_ca = process_ca
+    
+    # start scheduler if tasks are configured
+    scheduler = TaskScheduler(client_pool, process_ca)
+    scheduler.load_tasks(client_pool.tasks_config())
+    if scheduler.tasks:
+        await scheduler.start()
+        bot_app.scheduler = scheduler
+        logger.info(f"🗓️  Task scheduler started with {len(scheduler.tasks)} task(s)")
+    else:
+        logger.info("🗓️  No tasks configured; scheduler not started")
     
     snap = await state.snapshot()
     logger.info("=" * 60)

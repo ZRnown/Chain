@@ -65,7 +65,8 @@ def render_chart(
     # 3. 颜色定义（涨绿跌红）
     COLOR_UP = "#089981"    # 涨：绿色
     COLOR_DOWN = "#F23645"  # 跌：红色
-    COLOR_BG = "#FFFFFF"    # 背景：白色
+    COLOR_BG = "#0D1117"    # 背景：深色
+    GRID_COLOR = "#2A2F35"  # 深灰网格
     
     is_up = change_pct >= 0
     main_color = COLOR_UP if is_up else COLOR_DOWN
@@ -84,10 +85,10 @@ def render_chart(
     
     # 5. 创建样式
     style = mpf.make_mpf_style(
-        base_mpf_style='yahoo',
+        base_mpf_style='nightclouds',
         marketcolors=mc,
-        gridstyle=':',  # 点线网格
-        gridcolor='#E1E5EA',  # 浅灰色网格
+        gridstyle=':',
+        gridcolor=GRID_COLOR,
         facecolor=COLOR_BG,
         figcolor=COLOR_BG,
         rc={
@@ -95,6 +96,10 @@ def render_chart(
             'font.size': 9,
             'axes.labelsize': 8,
             'axes.linewidth': 0.5,
+            'axes.edgecolor': '#4B5563',
+            'axes.labelcolor': '#E5E7EB',
+            'xtick.color': '#E5E7EB',
+            'ytick.color': '#E5E7EB',
         }
     )
     
@@ -151,18 +156,17 @@ def render_chart(
     # 创建信息框文本（紧凑格式，三行）
     info_lines = [
         f"{metrics.symbol} / USD",
-        f"${price_display}",
-        f"{change_str} (1H)"
+        f"${price_display}  {change_str} (1H)",
     ]
     info_text = "\n".join(info_lines)
     
     # 绘制半透明背景框（白色背景，带边框，小尺寸）
     props = dict(
-        boxstyle='round,pad=0.4',
-        facecolor='white',
-        alpha=0.92,  # 92%不透明度
+        boxstyle='round,pad=0.3',
+        facecolor=COLOR_BG,
+        alpha=0.88,
         edgecolor=main_color,
-        linewidth=1.5,  # 使用涨跌颜色作为边框
+        linewidth=1.2,
     )
     
     # 在左上角显示（x=0.02表示左对齐，y=0.98表示顶部）
@@ -173,7 +177,7 @@ def render_chart(
         transform=ax_main.transAxes,
         fontsize=9,  # 小字体
         fontweight='bold',
-        color='#131722',
+        color='#E5E7EB',
         bbox=props,
         verticalalignment='top',
         horizontalalignment='left',  # 左对齐
@@ -186,7 +190,7 @@ def render_chart(
     
     # 11. 保存到内存（BytesIO）而不是文件
     buffer = BytesIO()
-    fig.savefig(buffer, format='png', dpi=120, bbox_inches='tight', pad_inches=0.1, facecolor=COLOR_BG)
+    fig.savefig(buffer, format='png', dpi=120, bbox_inches='tight', pad_inches=0.05, facecolor=COLOR_BG)
     buffer.seek(0)  # 重置指针到开头
     plt.close(fig)
     

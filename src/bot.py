@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 import re
+from pathlib import Path
 from typing import Awaitable, Callable, List, Optional, Tuple
 
 from telegram import Update, BotCommand, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
@@ -31,10 +33,12 @@ class BotApp:
         admin_ids: List[int],
         state: StateStore,
         process_ca: Optional[Callable[[str, str, bool], Awaitable[Tuple[Optional[str], Optional[str], Optional[str]]]]],
+        scheduler=None,
     ):
         self.admin_ids = admin_ids
         self.state = state
         self.process_ca = process_ca
+        self.scheduler = scheduler
         tg_token = os.getenv("TG_BOT_TOKEN")
         if not tg_token:
             raise RuntimeError("TG_BOT_TOKEN environment variable is required")
@@ -49,11 +53,19 @@ class BotApp:
         self.app.add_handler(CommandHandler("help", self.cmd_menu))
         self.app.add_handler(CommandHandler("c", self.cmd_c))
         self.app.add_handler(CommandHandler("settings", self.cmd_settings))
+        self.app.add_handler(CommandHandler("tasks", self.cmd_tasks))
+        self.app.add_handler(CommandHandler("task_pause", self.cmd_task_pause))
+        self.app.add_handler(CommandHandler("task_resume", self.cmd_task_resume))
+        self.app.add_handler(CommandHandler("add_client", self.cmd_add_client))
+        self.app.add_handler(CommandHandler("add_task", self.cmd_add_task))
         # 内联按钮回调处理
         self.app.add_handler(CallbackQueryHandler(self.handle_callback))
         # 监听文本消息（包括按钮点击后的文本输入）
         msg_filter = filters.TEXT & (~filters.COMMAND)
         self.app.add_handler(MessageHandler(msg_filter, self.on_text))
+        # 监听文档（用于接收 .session 文件等）
+        doc_filter = filters.Document.ALL
+        self.app.add_handler(MessageHandler(doc_filter, self.on_document))
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id if update.effective_user else None
@@ -69,7 +81,8 @@ class BotApp:
             # 给管理员显示键盘菜单
             keyboard = [
                 [KeyboardButton("📊 查看配置"), KeyboardButton("🔍 筛选条件")],
-                [KeyboardButton("👥 监听群组"), KeyboardButton("📤 推送群组")],
+                [KeyboardButton("👥 监听群组"), KeyboardButton("📤 推送目标")],
+                [KeyboardButton("🗓️ 任务管理")],
             ]
             reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
             text += "\n\n✅ **管理员权限已激活**\n使用下方按钮进行配置"
@@ -92,10 +105,10 @@ class BotApp:
             text += "`/del_listen <chat_id>` - 删除监听群\n"
             text += "`/list_listen` - 查看所有监听群\n\n"
             
-            text += "📤 **推送群组管理**\n"
-            text += "`/add_push [chat_id]` - 添加推送群（无参数则添加当前群）\n"
-            text += "`/del_push <chat_id>` - 删除推送群\n"
-            text += "`/list_push` - 查看所有推送群\n\n"
+            text += "📤 **推送目标管理**\n"
+            text += "`/add_push [chat_id]` - 添加推送目标（群/机器人/个人）\n"
+            text += "`/del_push <chat_id>` - 删除推送目标\n"
+            text += "`/list_push` - 查看所有推送目标\n\n"
             
             text += "⚙️ **筛选条件设置**\n"
             text += "`/set_filter <名称> <最小值|null> <最大值|null>` - 设置筛选条件\n"
@@ -136,7 +149,8 @@ class BotApp:
             await update.message.reply_text("❌ 处理功能未就绪")
             return
         try:
-            img_buffer, caption, error_msg = await self.process_ca(chain, ca, True)
+            current_task = await self.state.current_task()
+            img_buffer, caption, error_msg = await self.process_ca(chain, ca, True, task_id=current_task)
             if error_msg:
                 await update.message.reply_text(
                     f"❌ <b>查询失败</b>\n\n<code>{ca}</code>\n\n{error_msg}",
@@ -161,35 +175,61 @@ class BotApp:
             return
         snap = await self.state.snapshot()
         
-        text = "⚙️ **当前配置**\n\n"
+        current = snap.get("current_task")
+        tasks = snap.get("tasks", {})
+        if not current:
+            await update.message.reply_text("⚠️ 请先创建并选择任务，再查看配置。", parse_mode="HTML")
+            return
+        task_cfg = tasks.get(current, {"listen_chats": [], "push_chats": [], "filters": {}})
         
-        # 监听群组
-        listen_chats = snap.get("listen_chats", [])
-        text += f"👥 **监听群组** ({len(listen_chats)}个)\n"
+        text = f"⚙️ <b>当前配置</b>\n\n当前任务：<b>{html.escape(current)}</b>\n\n"
+        
+        listen_chats = task_cfg.get("listen_chats", [])
+        text += f"👥 <b>监听群组</b> ({len(listen_chats)}个)\n"
         if listen_chats:
             for chat_id in listen_chats:
                 chat_info = await self._get_chat_info(chat_id)
                 chat_name = chat_info.get('title', f'群组 {chat_id}') if chat_info else f'群组 {chat_id}'
-                text += f"• **{chat_name}** (`{chat_id}`)\n"
+                chat_name_escaped = html.escape(str(chat_name))
+                chat_id_escaped = html.escape(str(chat_id))
+                text += f"• <b>{chat_name_escaped}</b> (<code>{chat_id_escaped}</code>)\n"
         else:
             text += "• 暂无\n"
         text += "\n"
         
-        # 推送群组
-        push_chats = snap.get("push_chats", [])
-        text += f"📤 **推送群组** ({len(push_chats)}个)\n"
+        push_chats = task_cfg.get("push_chats", [])
+        text += f"📤 <b>推送目标</b> ({len(push_chats)}个)\n"
         if push_chats:
             for chat_id in push_chats:
                 chat_info = await self._get_chat_info(chat_id)
-                chat_name = chat_info.get('title', f'群组 {chat_id}') if chat_info else f'群组 {chat_id}'
-                text += f"• **{chat_name}** (`{chat_id}`)\n"
+                if chat_info:
+                    chat_name = chat_info.get('title', f'目标 {chat_id}')
+                    chat_type = chat_info.get('type', 'unknown')
+                    username = chat_info.get('username')
+                    chat_id_display = chat_info.get('id', chat_id)
+                    
+                    type_info = {
+                        'group': ('👥', '群组'),
+                        'supergroup': ('👥', '群组'),
+                        'channel': ('📢', '频道'),
+                        'private': ('👤', '个人'),
+                        'bot': ('🤖', '机器人')
+                    }.get(chat_type, ('📌', '目标'))
+                    
+                    type_icon, type_name = type_info
+                    chat_name_escaped = html.escape(str(chat_name))
+                    chat_id_escaped = html.escape(str(chat_id_display))
+                    username_str = f" @{html.escape(str(username))}" if username else ""
+                    text += f"• {type_icon} <b>{chat_name_escaped}</b> ({type_name}) <code>{chat_id_escaped}</code>{username_str}\n"
+                else:
+                    chat_id_escaped = html.escape(str(chat_id))
+                    text += f"• 📌 <b>目标</b> (<code>{chat_id_escaped}</code>)\n"
         else:
             text += "• 暂无\n"
         text += "\n"
         
-        # 筛选条件
-        text += "🔍 **筛选条件**\n"
-        filters_cfg = snap.get("filters", {})
+        text += "🔍 <b>筛选条件</b>\n"
+        filters_cfg = task_cfg.get("filters", {})
         filter_names = {
             "market_cap_usd": "市值(USD)",
             "liquidity_usd": "池子(USD)",
@@ -211,7 +251,107 @@ class BotApp:
                 text += f"• {display_name}: {min_str} ~ {max_str}\n"
         text += "\n"
         
-        await update.message.reply_text(text, parse_mode="Markdown")
+        await update.message.reply_text(text, parse_mode="HTML")
+
+    async def cmd_tasks(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id not in self.admin_ids:
+            await update.message.reply_text("❌ 无权限")
+            return
+        if not self.scheduler:
+            await update.message.reply_text("⚠️ 未启用任务调度（缺少配置或启动失败）")
+            return
+        tasks = self.scheduler.list_tasks()
+        if not tasks:
+            await update.message.reply_text("📋 当前无任务")
+            return
+        lines = ["📋 任务列表:"]
+        for t in tasks:
+            status = "✅ 启用" if t.get("enabled") else "⏸️ 暂停"
+            lines.append(f"- {t.get('id')} | {t.get('name')} | {status} | 每{t.get('interval_minutes')}分钟 | client={t.get('client')}")
+        await update.message.reply_text("\n".join(lines))
+
+    async def cmd_task_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id not in self.admin_ids:
+            await update.message.reply_text("❌ 无权限")
+            return
+        if not self.scheduler:
+            await update.message.reply_text("⚠️ 未启用任务调度")
+            return
+        if not context.args:
+            await update.message.reply_text("用法: /task_pause <task_id>")
+            return
+        task_id = context.args[0]
+        ok = self.scheduler.pause(task_id)
+        await update.message.reply_text("✅ 已暂停" if ok else "❌ 未找到任务")
+
+    async def cmd_task_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id not in self.admin_ids:
+            await update.message.reply_text("❌ 无权限")
+            return
+        if not self.scheduler:
+            await update.message.reply_text("⚠️ 未启用任务调度")
+            return
+        if not context.args:
+            await update.message.reply_text("用法: /task_resume <task_id>")
+            return
+        task_id = context.args[0]
+        ok = self.scheduler.resume(task_id)
+        await update.message.reply_text("✅ 已恢复" if ok else "❌ 未找到任务")
+
+    async def cmd_add_client(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id not in self.admin_ids:
+            await update.message.reply_text("❌ 无权限")
+            return
+        if not self.scheduler or not self.scheduler.client_pool:
+            await update.message.reply_text("⚠️ 未启用任务调度/客户端池")
+            return
+        # 用法: /add_client <name> <session>
+        if len(context.args) < 2:
+            await update.message.reply_text("用法: /add_client <name> <session_path 或 string_session>")
+            return
+        name = context.args[0]
+        session_path = " ".join(context.args[1:])
+        try:
+            final_name = await self.scheduler.client_pool.add_client(name, session_path)
+        except Exception as e:
+            await update.message.reply_text(f"❌ 添加失败: {e}\n⚙️ 请确认 .env 已设置 TELEGRAM_API_ID / TELEGRAM_API_HASH")
+            return
+        await update.message.reply_text(f"✅ 客户端已添加并启动：{final_name}")
+
+    async def cmd_add_task(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id not in self.admin_ids:
+            await update.message.reply_text("❌ 无权限")
+            return
+        if not self.scheduler:
+            await update.message.reply_text("⚠️ 未启用任务调度")
+            return
+        # 用法: /add_task <id> <client> <chain> <ca> <interval_minutes> <targets_csv>
+        if len(context.args) < 6:
+            await update.message.reply_text("用法: /add_task <id> <client> <chain> <ca> <interval_minutes> <targets_csv>")
+            return
+        task_id = context.args[0]
+        client = context.args[1]
+        chain = context.args[2]
+        ca = context.args[3]
+        try:
+            interval = int(context.args[4])
+        except Exception:
+            await update.message.reply_text("❌ interval_minutes 需要是数字")
+            return
+        targets_csv = context.args[5]
+        targets = [t.strip() for t in targets_csv.split(",") if t.strip()]
+        task = {
+            "id": task_id,
+            "name": task_id,
+            "client": client,
+            "chain": chain,
+            "ca": ca,
+            "targets": targets,
+            "interval_minutes": interval,
+            "enabled": True,
+        }
+        ok = self.scheduler.add_task(task)
+        await update.message.reply_text("✅ 任务已添加" if ok else "❌ 任务ID已存在")
 
     async def cmd_add_listen(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id not in self.admin_ids:
@@ -258,15 +398,17 @@ class BotApp:
         snap = await self.state.snapshot()
         listen_chats = snap.get("listen_chats", [])
         if not listen_chats:
-            await update.message.reply_text("📋 **监听群组列表**\n\n暂无监听群组\n\n💡 使用 `/add_listen` 添加", parse_mode="Markdown")
+            await update.message.reply_text("📋 <b>监听群组列表</b>\n\n暂无监听群组\n\n💡 使用 <code>/add_listen</code> 添加", parse_mode="HTML")
             return
-        text = f"📋 **监听群组列表** ({len(listen_chats)}个)\n\n"
+        text = f"📋 <b>监听群组列表</b> ({len(listen_chats)}个)\n\n"
         for idx, chat_id in enumerate(listen_chats, 1):
             chat_info = await self._get_chat_info(chat_id)
-            chat_name = chat_info.get('title', f'群组 {chat_id}') if chat_info else f'群组 {chat_id}'
-            text += f"{idx}. **{chat_name}**\n   ID: `{chat_id}`\n\n"
-        text += "💡 使用 `/del_listen <chat_id>` 删除"
-        await update.message.reply_text(text, parse_mode="Markdown")
+            chat_name = chat_info.get('title', f'目标 {chat_id}') if chat_info else f'目标 {chat_id}'
+            chat_name_escaped = html.escape(str(chat_name))
+            chat_id_escaped = html.escape(str(chat_id))
+            text += f"{idx}. <b>{chat_name_escaped}</b>\n   ID: <code>{chat_id_escaped}</code>\n\n"
+        text += "💡 使用 <code>/del_listen &lt;chat_id&gt;</code> 删除"
+        await update.message.reply_text(text, parse_mode="HTML")
 
     async def cmd_add_push(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id not in self.admin_ids:
@@ -313,15 +455,38 @@ class BotApp:
         snap = await self.state.snapshot()
         push_chats = snap.get("push_chats", [])
         if not push_chats:
-            await update.message.reply_text("📋 **推送群组列表**\n\n暂无推送群组\n\n💡 使用 `/add_push` 添加", parse_mode="Markdown")
+            await update.message.reply_text("📋 <b>推送群组列表</b>\n\n暂无推送群组\n\n💡 使用 <code>/add_push</code> 添加", parse_mode="HTML")
             return
-        text = f"📋 **推送群组列表** ({len(push_chats)}个)\n\n"
+        text = f"📋 <b>推送群组列表</b> ({len(push_chats)}个)\n\n"
         for idx, chat_id in enumerate(push_chats, 1):
             chat_info = await self._get_chat_info(chat_id)
-            chat_name = chat_info.get('title', f'群组 {chat_id}') if chat_info else f'群组 {chat_id}'
-            text += f"{idx}. **{chat_name}**\n   ID: `{chat_id}`\n\n"
-        text += "💡 使用 `/del_push <chat_id>` 删除"
-        await update.message.reply_text(text, parse_mode="Markdown")
+            if chat_info:
+                chat_name = chat_info.get('title', f'目标 {chat_id}')
+                chat_type = chat_info.get('type', 'unknown')
+                username = chat_info.get('username')
+                chat_id_display = chat_info.get('id', chat_id)
+                
+                # 类型图标和名称
+                type_info = {
+                    'group': ('👥', '群组'),
+                    'supergroup': ('👥', '群组'),
+                    'channel': ('📢', '频道'),
+                    'private': ('👤', '个人'),
+                    'bot': ('🤖', '机器人')
+                }.get(chat_type, ('📌', '目标'))
+                
+                type_icon, type_name = type_info
+                chat_name_escaped = html.escape(str(chat_name))
+                chat_id_escaped = html.escape(str(chat_id_display))
+                username_str = f" @{html.escape(str(username))}" if username else ""
+                text += f"{idx}. {type_icon} <b>{chat_name_escaped}</b> ({type_name})\n   ID: <code>{chat_id_escaped}</code>{username_str}\n\n"
+            else:
+                chat_name = f'群组 {chat_id}'
+                chat_name_escaped = html.escape(str(chat_name))
+                chat_id_escaped = html.escape(str(chat_id))
+                text += f"{idx}. <b>{chat_name_escaped}</b>\n   ID: <code>{chat_id_escaped}</code>\n\n"
+        text += "💡 使用 <code>/del_push &lt;chat_id&gt;</code> 删除"
+        await update.message.reply_text(text, parse_mode="HTML")
 
     async def cmd_set_filter(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id not in self.admin_ids:
@@ -415,7 +580,7 @@ class BotApp:
             return
         
         # 处理管理员按钮菜单
-        if is_admin and chat_id == user_id:  # 私聊中的按钮
+        if is_admin and chat_id == user_id:  # 私聊中的按钮/配置输入
             await self.handle_admin_button(update, context, text)
             return
         
@@ -423,39 +588,64 @@ class BotApp:
         if not self.process_ca:
             return
         snap = await self.state.snapshot()
-        if chat_id not in snap["listen_chats"]:
-            logger.debug(f"⏭️  Message from non-listened chat {chat_id}, ignoring")
+        tasks = snap.get("tasks", {})
+        if not tasks:
+            logger.debug("⏭️  No tasks configured, ignoring message")
+            return
+
+        # 找到包含该监听群的已启用任务
+        matched_tasks = []
+        for tid, cfg in tasks.items():
+            if cfg.get("enabled") and chat_id in cfg.get("listen_chats", []):
+                matched_tasks.append(tid)
+
+        if not matched_tasks:
+            logger.debug(f"⏭️  Chat {chat_id} not in any enabled task listen list")
             return
         
-        logger.info(f"📨 Message received from chat {chat_id}")
+        logger.info(f"📨 Message received from chat {chat_id} for tasks: {matched_tasks}")
         found = set(CA_PATTERN.findall(text))
         logger.info(f"🔍 Found {len(found)} CA(s) in message: {[ca[:8] + '...' for ca in found]}")
         
         for ca in found:
-            # Silently process (errors are logged but not shown to user in auto mode)
-            await self.process_ca(chain_hint(ca), ca, False)
+            # 每个任务独立后台处理，避免阻塞
+            for tid in matched_tasks:
+                asyncio.create_task(self._process_ca_bg(chain_hint(ca), ca, task_id=tid))
     
     async def handle_admin_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
         """处理管理员按钮菜单"""
+        # 先处理通用“完成”指令（结束等待状态）
+        user_id = update.effective_user.id
+        if text.strip() in ("完成", "完毕", "done", "Done", "DONE"):
+            if hasattr(context, 'user_data') and context.user_data.get(f'{user_id}_waiting'):
+                context.user_data[f'{user_id}_waiting'] = None
+                await update.message.reply_text("✅ 已结束当前配置流程")
+                return
+
         if text == "📊 查看配置":
             await self.cmd_settings(update, context)
         elif text == "👥 监听群组":
             await self.show_listen_menu(update.message)
-        elif text == "📤 推送群组":
+        elif text == "📤 推送目标":
             await self.show_push_menu(update.message)
         elif text == "🔍 筛选条件":
             await self.show_filter_menu(update.message)
+        elif text == "🗓️ 任务管理":
+            await self.show_task_menu(update.message)
         else:
             # 可能是输入的值（用于设置筛选条件）
             # 检查是否有待处理的设置
-            user_id = update.effective_user.id
             if hasattr(context, 'user_data') and context.user_data.get(f'{user_id}_waiting'):
                 await self.handle_setting_input(update, context, text)
     
     async def show_listen_menu(self, message):
         """显示监听群组菜单"""
         snap = await self.state.snapshot()
-        listen_chats = snap.get("listen_chats", [])
+        current = snap.get("current_task")
+        if not current:
+            await message.reply_text("⚠️ 请先创建并选择任务，然后再配置监听群组。", parse_mode="HTML")
+            return
+        listen_chats = snap.get("tasks", {}).get(current, {}).get("listen_chats", [])
         
         keyboard = [
             [InlineKeyboardButton("➕ 添加群组", callback_data="add_listen_link")],
@@ -465,28 +655,32 @@ class BotApp:
         reply_markup = InlineKeyboardMarkup(keyboard)
         count = len(listen_chats)
         await message.reply_text(
-            f"👥 **监听群组管理**\n\n当前有 **{count}** 个监听群组\n\n"
+            f"👥 <b>监听群组管理</b>（当前任务：{html.escape(current)}）\n\n当前有 <b>{count}</b> 个监听群组\n\n"
             f"💡 点击「添加群组」后，发送群组邀请链接或公共群链接",
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=reply_markup
         )
     
     async def show_push_menu(self, message):
-        """显示推送群组菜单"""
+        """显示推送目标菜单（群组/机器人/个人）"""
         snap = await self.state.snapshot()
-        push_chats = snap.get("push_chats", [])
+        current = snap.get("current_task")
+        if not current:
+            await message.reply_text("⚠️ 请先创建并选择任务，然后再配置推送目标。", parse_mode="HTML")
+            return
+        push_chats = snap.get("tasks", {}).get(current, {}).get("push_chats", [])
         
         keyboard = [
-            [InlineKeyboardButton("➕ 添加群组", callback_data="add_push_link")],
+            [InlineKeyboardButton("➕ 添加目标", callback_data="add_push_link")],
             [InlineKeyboardButton("📋 查看列表", callback_data="list_push")],
         ]
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         count = len(push_chats)
         await message.reply_text(
-            f"📤 **推送群组管理**\n\n当前有 **{count}** 个推送群组\n\n"
-            f"💡 点击「添加群组」后，发送群组邀请链接或公共群链接",
-            parse_mode="Markdown",
+            f"📤 <b>推送目标管理</b>（当前任务：{html.escape(current)}）\n\n当前有 <b>{count}</b> 个推送目标（群组/机器人/个人）\n\n"
+            f"💡 点击「添加目标」后，发送群组/机器人的邀请链接、@用户名或chat_id（数字）",
+            parse_mode="HTML",
             reply_markup=reply_markup
         )
     
@@ -515,6 +709,21 @@ class BotApp:
             parse_mode="Markdown",
             reply_markup=reply_markup
         )
+
+    async def show_task_menu(self, message):
+        """显示任务管理菜单"""
+        keyboard = [
+            [InlineKeyboardButton("📋 查看任务", callback_data="list_tasks")],
+            [InlineKeyboardButton("👤 客户端列表", callback_data="list_clients")],
+            [InlineKeyboardButton("➕ 添加客户端", callback_data="add_client_prompt")],
+            [InlineKeyboardButton("➕ 添加任务", callback_data="add_task_prompt")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await message.reply_text(
+            "🗓️ **任务管理**\n\n支持多客户端、多任务定时推送。\n请选择操作：",
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
     
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理内联按钮回调"""
@@ -537,7 +746,7 @@ class BotApp:
         elif data.startswith("del_listen_"):
             chat_id = int(data.split("_")[-1])
             await self.state.del_listen(chat_id)
-            await query.edit_message_text(f"✅ 已删除监听群: `{chat_id}`", parse_mode="Markdown")
+            await query.edit_message_text(f"✅ 已删除监听群: <code>{chat_id}</code>", parse_mode="HTML")
         elif data == "list_listen":
             await self.list_listen_callback(query)
         elif data == "back_listen":
@@ -545,14 +754,20 @@ class BotApp:
         
         # 推送群组
         elif data == "add_push_link":
-            await query.edit_message_text("📝 请发送群组邀请链接或公共群链接：\n\n格式：\n• `https://t.me/joinchat/...` (私有群)\n• `https://t.me/groupname` (公共群)\n• 或直接发送群组ID（数字）")
+            await query.edit_message_text(
+                "📝 请发送推送目标：\n\n"
+                "• 群组/机器人的邀请链接\n"
+                "• @用户名\n"
+                "• chat_id（数字，可为负数）",
+                parse_mode="HTML"
+            )
             if not hasattr(context, 'user_data'):
                 context.user_data = {}
             context.user_data[f'{user_id}_waiting'] = 'add_push_link'
         elif data.startswith("del_push_"):
             chat_id = int(data.split("_")[-1])
             await self.state.del_push(chat_id)
-            await query.edit_message_text(f"✅ 已删除推送群: `{chat_id}`", parse_mode="Markdown")
+            await query.edit_message_text(f"✅ 已删除推送群: <code>{chat_id}</code>", parse_mode="HTML")
         elif data == "list_push":
             await self.list_push_callback(query)
         elif data == "back_push":
@@ -590,7 +805,70 @@ class BotApp:
                           "holder_count", "max_holder_ratio", "trades_5m"]
             for key in filter_keys:
                 await self.state.set_filter(key, None, None)
-            await query.edit_message_text("✅ 已重置所有筛选条件")
+            await query.edit_message_text("✅ 已重置当前任务的所有筛选条件")
+        
+        # 任务管理
+        elif data == "list_tasks":
+            await self.list_tasks_callback(query)
+        elif data == "add_client_prompt":
+            await query.edit_message_text(
+                "📝 <b>批量添加客户端</b>\n\n"
+                "可以上传多个 session 文件或发送多个字符串 session：\n\n"
+                "• 上传 <code>.session</code> 文件（自动生成名称）\n"
+                "• 发送字符串：<code>名称 session字符串</code>\n"
+                "• 或直接发送 session 字符串（自动生成名称）\n\n"
+                "完成后输入：<code>完成</code> 或 <code>done</code>\n\n"
+                "⚙️ 请先在 <code>.env</code> 设置 <code>TELEGRAM_API_ID</code> / <code>TELEGRAM_API_HASH</code>（或 APP_ID / APP_HASH）。",
+                parse_mode="HTML"
+            )
+            if not hasattr(context, 'user_data'):
+                context.user_data = {}
+            context.user_data[f'{user_id}_waiting'] = 'add_client'
+            context.user_data[f'{user_id}_client_count'] = 0
+        elif data == "add_task_prompt":
+            await query.edit_message_text(
+                "📝 <b>创建任务</b>\n\n"
+                "只需输入任务名称，例如：<code>任务A</code>\n"
+                "创建后会自动切换为当前任务，默认处于“暂停”状态。\n"
+                "请继续配置：监听群组、推送目标、筛选条件，并在任务列表中启用。",
+                parse_mode="HTML"
+            )
+            if not hasattr(context, 'user_data'):
+                context.user_data = {}
+            context.user_data[f'{user_id}_waiting'] = 'add_task'
+        elif data == "list_clients":
+            await self.list_clients_callback(query)
+        elif data.startswith("del_client_"):
+            client_name = data.replace("del_client_", "")
+            if self.scheduler and self.scheduler.client_pool:
+                ok = await self.scheduler.client_pool.remove_client(client_name)
+                if ok:
+                    await query.answer("✅ 客户端已删除")
+                    await self.list_clients_callback(query)
+                else:
+                    await query.answer("❌ 未找到该客户端")
+            else:
+                await query.answer("⚠️ 未启用任务调度/客户端池")
+        elif data.startswith("task_select:"):
+            task_id = data.split(":", 1)[1]
+            await self.state.set_current_task(task_id)
+            await query.answer(f"已切换到任务 {task_id}")
+            await self.list_tasks_callback(query)
+        elif data.startswith("task_enable:"):
+            task_id = data.split(":", 1)[1]
+            await self.state.set_task_enabled(task_id, True)
+            await query.answer("已启用")
+            await self.list_tasks_callback(query)
+        elif data.startswith("task_disable:"):
+            task_id = data.split(":", 1)[1]
+            await self.state.set_task_enabled(task_id, False)
+            await query.answer("已暂停")
+            await self.list_tasks_callback(query)
+        elif data.startswith("task_delete:"):
+            task_id = data.split(":", 1)[1]
+            ok = await self.state.delete_task(task_id)
+            await query.answer("已删除" if ok else "未找到任务")
+            await self.list_tasks_callback(query)
         
     async def handle_setting_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
         """处理设置输入"""
@@ -605,26 +883,30 @@ class BotApp:
                 if chat_id:
                     await self.state.add_listen(chat_id)
                     chat_info = await self._get_chat_info(chat_id)
-                    chat_name = chat_info.get('title', f'群组 {chat_id}') if chat_info else f'群组 {chat_id}'
+                    chat_name = chat_info.get('title', f'目标 {chat_id}') if chat_info else f'目标 {chat_id}'
+                    chat_name_escaped = html.escape(str(chat_name))
+                    chat_id_escaped = html.escape(str(chat_id))
                     await update.message.reply_text(
-                        f"✅ 已添加监听群\n\n"
-                        f"**{chat_name}**\n"
-                        f"ID: `{chat_id}`",
-                        parse_mode="Markdown"
+                        f"✅ 已为当前任务添加监听群\n\n"
+                        f"<b>{chat_name_escaped}</b>\n"
+                        f"ID: <code>{chat_id_escaped}</code>",
+                        parse_mode="HTML"
                     )
                 else:
-                    await update.message.reply_text("❌ 无法从链接中提取群组ID，请检查链接格式")
+                    await update.message.reply_text("❌ 无法解析该链接/用户名，请检查格式")
             elif waiting == 'add_push_link':
                 chat_id = await self._extract_chat_id_from_link(text.strip())
                 if chat_id:
                     await self.state.add_push(chat_id)
                     chat_info = await self._get_chat_info(chat_id)
                     chat_name = chat_info.get('title', f'群组 {chat_id}') if chat_info else f'群组 {chat_id}'
+                    chat_name_escaped = html.escape(str(chat_name))
+                    chat_id_escaped = html.escape(str(chat_id))
                     await update.message.reply_text(
-                        f"✅ 已添加推送群\n\n"
-                        f"**{chat_name}**\n"
-                        f"ID: `{chat_id}`",
-                        parse_mode="Markdown"
+                        f"✅ 已为当前任务添加推送目标\n\n"
+                        f"<b>{chat_name_escaped}</b>\n"
+                        f"ID/用户名: <code>{chat_id_escaped}</code>",
+                        parse_mode="HTML"
                     )
                 else:
                     await update.message.reply_text("❌ 无法从链接中提取群组ID，请检查链接格式")
@@ -632,7 +914,7 @@ class BotApp:
                 filter_key = waiting.replace('set_filter_', '')
                 parts = text.strip().split()
                 if len(parts) != 2:
-                    await update.message.reply_text("❌ 格式错误，请输入：`最小值 最大值`", parse_mode="Markdown")
+                    await update.message.reply_text("❌ 格式错误，请输入：<code>最小值 最大值</code>", parse_mode="HTML")
                     return
                 min_v = None if parts[0].lower() == "null" else float(parts[0])
                 max_v = None if parts[1].lower() == "null" else float(parts[1])
@@ -644,11 +926,58 @@ class BotApp:
                     "trades_5m": "5分钟交易数",
                 }
                 display_name = filter_names.get(filter_key, filter_key)
+                display_name_escaped = html.escape(str(display_name))
                 min_str = f"{min_v:,.0f}" if min_v is not None else "无限制"
                 max_str = f"{max_v:,.0f}" if max_v is not None else "无限制"
                 await update.message.reply_text(
-                    f"✅ 筛选条件已更新\n\n**{display_name}**\n最小值: {min_str}\n最大值: {max_str}",
-                    parse_mode="Markdown"
+                    f"✅ 筛选条件已更新\n\n<b>{display_name_escaped}</b>\n最小值: {min_str}\n最大值: {max_str}",
+                    parse_mode="HTML"
+                )
+            elif waiting == 'add_client':
+                # 检查是否输入"完成"
+                if text.strip().lower() in ('完成', 'done', 'finish'):
+                    count = context.user_data.get(f'{user_id}_client_count', 0)
+                    context.user_data[f'{user_id}_waiting'] = None
+                    context.user_data[f'{user_id}_client_count'] = 0
+                    await update.message.reply_text(f"✅ 批量添加完成！共添加 {count} 个客户端")
+                    return
+                
+                # 支持：
+                # 1) "name session"（自定义名称）
+                # 2) 纯 session 字符串（自动使用该账号 username 作为名称）
+                raw = text.strip()
+                parts = raw.split(maxsplit=1)
+                name = parts[0] if len(parts) == 2 else None
+                session = parts[1] if len(parts) == 2 else raw
+                if not self.scheduler or not self.scheduler.client_pool:
+                    await update.message.reply_text("⚠️ 未启用任务调度/客户端池")
+                    return
+                try:
+                    final_name = await self.scheduler.client_pool.add_client(name, session)
+                    count = context.user_data.get(f'{user_id}_client_count', 0) + 1
+                    context.user_data[f'{user_id}_client_count'] = count
+                    await update.message.reply_text(
+                        f"✅ 客户端已添加：{final_name}（第 {count} 个）\n继续上传文件或发送字符串，完成后输入「完成」"
+                    )
+                except Exception as e:
+                    await update.message.reply_text(f"❌ 添加失败: {e}")
+            elif waiting == 'add_task':
+                name = text.strip()
+                if not name:
+                    await update.message.reply_text("❌ 任务名称不能为空")
+                    return
+                created = await self.state.create_task(name)
+                if not created:
+                    await update.message.reply_text("❌ 任务已存在，请换一个名称")
+                    return
+                await self.state.set_current_task(name)
+                count = context.user_data.get(f'{user_id}_task_count', 0) + 1
+                context.user_data[f'{user_id}_task_count'] = count
+                await update.message.reply_text(
+                    f"✅ 已创建任务并切换为当前：{name}\n"
+                    f"（默认暂停，请在任务列表启用；继续配置监听群、推送目标、筛选条件）\n"
+                    f"已创建数量：{count}",
+                    parse_mode="HTML"
                 )
             # 清除等待状态
             context.user_data[f'{user_id}_waiting'] = None
@@ -657,55 +986,119 @@ class BotApp:
         except Exception as e:
             await update.message.reply_text(f"❌ 设置失败: {e}")
     
-    async def _extract_chat_id_from_link(self, link: str) -> Optional[int]:
-        """从Telegram邀请链接中提取chat_id"""
+    async def _extract_chat_id_from_link(self, link: str):
+        """从Telegram邀请链接中提取chat_id或username（支持群组/机器人/个人）"""
         import re
         try:
-            # 如果直接是数字ID（可能是负数，表示群组）
             link_clean = link.strip()
+            
+            # 如果直接是数字ID（可能是负数，表示群组）
             if link_clean.lstrip('-').isdigit():
                 return int(link_clean)
             
-            # 处理私有群邀请链接: https://t.me/joinchat/...
-            # 对于joinchat链接，bot需要先加入群组才能获取chat_id
-            # 我们尝试通过join_chat方法加入，然后获取chat_id
-            if 'joinchat' in link or 'join' in link:
+            # 如果直接是@username格式，返回字符串
+            if link_clean.startswith('@'):
+                return link_clean
+            
+            # 处理私有群邀请链接: https://t.me/joinchat/... 或 https://t.me/+...
+            if 'joinchat' in link_clean or link_clean.startswith("https://t.me/+") or link_clean.startswith("t.me/+"):
                 try:
-                    # 提取邀请token
-                    match = re.search(r'joinchat/([a-zA-Z0-9_-]+)', link)
-                    if match:
-                        invite_hash = match.group(1)
-                        # 尝试加入群组
-                        chat = await self.app.bot.join_chat(link)
-                        return chat.id
+                    chat = await self.app.bot.join_chat(link_clean)
+                    return chat.id
                 except Exception as e:
                     logger.warning(f"Failed to join chat from link {link}: {e}")
                     return None
             
-            # 处理公共群链接: https://t.me/groupname 或 @groupname
+            # 处理公共群/机器人链接: https://t.me/groupname 或 @groupname
             match = re.search(r'(?:t\.me/|@)([a-zA-Z0-9_]+)', link)
             if match:
                 username = match.group(1)
                 try:
+                    # 尝试获取chat信息，如果成功返回ID，否则返回@username字符串
                     chat = await self.app.bot.get_chat(f"@{username}")
                     return chat.id
                 except Exception as e:
-                    logger.warning(f"Failed to get chat from username {username}: {e}")
-                    return None
+                    # 如果获取失败，可能是机器人或无效用户名，返回@username字符串
+                    logger.debug(f"Failed to get chat from username {username}: {e}, returning @username")
+                    return f"@{username}"
             
             return None
         except Exception as e:
             logger.warning(f"Failed to extract chat_id from link {link}: {e}")
             return None
-    
-    async def _get_chat_info(self, chat_id: int) -> Optional[dict]:
-        """获取群组信息"""
+
+    async def on_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """处理文档消息（用于接收 .session 文件）"""
+        if not update.message or not update.effective_user:
+            return
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        if user_id not in self.admin_ids or chat_id != user_id:
+            # 仅在管理员私聊中处理
+            return
+        if not hasattr(context, 'user_data'):
+            context.user_data = {}
+        waiting = context.user_data.get(f'{user_id}_waiting', '')
+        if waiting != 'add_client':
+            return
+
+        if not self.scheduler or not self.scheduler.client_pool:
+            await update.message.reply_text("⚠️ 未启用任务调度/客户端池")
+            return
+
+        doc = update.message.document
+        if not doc:
+            return
         try:
+            # 保存到本地 sessions 目录
+            sessions_dir = Path("sessions")
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+            filename = doc.file_name or f"{doc.file_unique_id}.session"
+            dest = sessions_dir / filename
+            tg_file = await doc.get_file()
+            await tg_file.download_to_drive(custom_path=str(dest))
+
+            final_name = await self.scheduler.client_pool.add_client(None, str(dest))
+            count = context.user_data.get(f'{user_id}_client_count', 0) + 1
+            context.user_data[f'{user_id}_client_count'] = count
+            await update.message.reply_text(
+                f"✅ 已从文件添加客户端：{final_name}（第 {count} 个）\n路径：`{dest}`\n继续上传文件或发送字符串，完成后输入「完成」",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to handle session document: {e}")
+            await update.message.reply_text(f"❌ 处理 session 文件失败: {e}")
+    
+    async def _get_chat_info(self, chat_id) -> Optional[dict]:
+        """获取聊天信息（支持群组/机器人/个人）"""
+        try:
+            # 支持字符串（@username）或整数（chat_id）
             chat = await self.app.bot.get_chat(chat_id)
+            chat_type = chat.type
+            title = None
+            username = None
+            
+            if chat_type == "private":
+                title = f"{chat.first_name or ''} {chat.last_name or ''}".strip() or chat.username or f"用户 {chat.id}"
+                username = chat.username
+            elif chat_type in ("group", "supergroup"):
+                title = chat.title
+                username = chat.username
+            elif chat_type == "channel":
+                title = chat.title
+                username = chat.username
+            elif chat_type == "bot":
+                title = chat.first_name or chat.username or f"机器人 {chat.id}"
+                username = chat.username
+            else:
+                title = getattr(chat, 'title', None) or getattr(chat, 'first_name', None) or f"目标 {chat.id}"
+                username = getattr(chat, 'username', None)
+            
             return {
-                'title': chat.title,
-                'username': chat.username,
-                'type': chat.type
+                'title': title,
+                'username': username,
+                'type': chat_type,
+                'id': chat.id
             }
         except Exception as e:
             logger.debug(f"Failed to get chat info for {chat_id}: {e}")
@@ -713,80 +1106,209 @@ class BotApp:
     
     async def list_listen_callback(self, query):
         snap = await self.state.snapshot()
-        listen_chats = snap.get("listen_chats", [])
+        current = snap.get("current_task")
+        tasks = snap.get("tasks", {})
+        if not current:
+            await query.edit_message_text("⚠️ 请先创建并选择任务，再配置监听群组。", parse_mode="HTML")
+            return
+        listen_chats = tasks.get(current, {}).get("listen_chats", [])
         if not listen_chats:
-            await query.edit_message_text("📋 **监听群组列表**\n\n暂无监听群组", parse_mode="Markdown")
+            await query.edit_message_text(f"📋 <b>监听群组列表</b>（当前任务：{html.escape(current)}）\n\n暂无监听群组", parse_mode="HTML")
             return
         
         keyboard = []
-        text = f"📋 **监听群组列表** ({len(listen_chats)}个)\n\n"
+        text = f"📋 <b>监听群组列表</b>（当前任务：{html.escape(current)}） ({len(listen_chats)}个)\n\n"
         for idx, chat_id in enumerate(listen_chats, 1):
             chat_info = await self._get_chat_info(chat_id)
-            chat_name = chat_info.get('title', f'群组 {chat_id}') if chat_info else f'群组 {chat_id}'
-            text += f"{idx}. **{chat_name}**\n   ID: `{chat_id}`\n\n"
+            chat_name = html.escape(chat_info.get('title', f'群组 {chat_id}') if chat_info else f'群组 {chat_id}')
+            text += f"{idx}. <b>{chat_name}</b>\n   ID: <code>{chat_id}</code>\n\n"
             keyboard.append([InlineKeyboardButton(f"❌ 删除 {chat_name}", callback_data=f"del_listen_{chat_id}")])
         
         keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="back_listen")])
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=reply_markup)
     
     async def list_push_callback(self, query):
         snap = await self.state.snapshot()
-        push_chats = snap.get("push_chats", [])
+        current = snap.get("current_task")
+        tasks = snap.get("tasks", {})
+        if not current:
+            await query.edit_message_text("⚠️ 请先创建并选择任务，再配置推送目标。", parse_mode="HTML")
+            return
+        push_chats = tasks.get(current, {}).get("push_chats", [])
         if not push_chats:
-            await query.edit_message_text("📋 **推送群组列表**\n\n暂无推送群组", parse_mode="Markdown")
+            await query.edit_message_text(f"📋 <b>推送目标列表</b>（当前任务：{html.escape(current)}）\n\n暂无推送目标", parse_mode="HTML")
             return
         
         keyboard = []
-        text = f"📋 **推送群组列表** ({len(push_chats)}个)\n\n"
+        text = f"📋 <b>推送目标列表</b>（当前任务：{html.escape(current)}） ({len(push_chats)}个)\n\n"
         for idx, chat_id in enumerate(push_chats, 1):
             chat_info = await self._get_chat_info(chat_id)
-            chat_name = chat_info.get('title', f'群组 {chat_id}') if chat_info else f'群组 {chat_id}'
-            text += f"{idx}. **{chat_name}**\n   ID: `{chat_id}`\n\n"
-            keyboard.append([InlineKeyboardButton(f"❌ 删除 {chat_name}", callback_data=f"del_push_{chat_id}")])
+            if chat_info:
+                chat_name = html.escape(chat_info.get('title', f'目标 {chat_id}'))
+                chat_type = chat_info.get('type', 'unknown')
+                username = chat_info.get('username')
+                chat_id_display = chat_info.get('id', chat_id)
+                
+                type_icon = {
+                    'group': '👥',
+                    'supergroup': '👥',
+                    'channel': '📢',
+                    'private': '👤',
+                    'bot': '🤖'
+                }.get(chat_type, '📌')
+                
+                type_name = {
+                    'group': '群组',
+                    'supergroup': '群组',
+                    'channel': '频道',
+                    'private': '个人',
+                    'bot': '机器人'
+                }.get(chat_type, '目标')
+                
+                username_str = f" @{html.escape(username)}" if username else ""
+                text += f"{idx}. {type_icon} <b>{chat_name}</b> ({type_name})\n   ID: <code>{chat_id_display}</code>{username_str}\n\n"
+            else:
+                chat_id_escaped = html.escape(str(chat_id))
+                text += f"{idx}. 📌 <b>目标</b>\n   ID/用户名: <code>{chat_id_escaped}</code>\n\n"
+            keyboard.append([InlineKeyboardButton(f"❌ 删除", callback_data=f"del_push_{chat_id}")])
         
         keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="back_push")])
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=reply_markup)
+    
+    async def list_tasks_callback(self, query):
+        snap = await self.state.snapshot()
+        tasks = snap.get("tasks", {})
+        current = snap.get("current_task")
+        keyboard = []
+        lines = []
+        if not tasks:
+            lines.append("📋 <b>任务列表</b>\n\n暂无任务")
+        else:
+            lines.append(f"📋 <b>任务列表</b> ({len(tasks)}个)\n")
+            for tid, cfg in tasks.items():
+                status = "✅ 启用" if cfg.get("enabled") else "⏸️ 暂停"
+                tag = "（当前）" if tid == current else ""
+                listen_count = len(cfg.get("listen_chats", []))
+                push_count = len(cfg.get("push_chats", []))
+                lines.append(f"• <b>{html.escape(tid)}</b> {tag} | {status}")
+                lines.append(f"  监听: {listen_count} | 推送: {push_count}")
+                btn_row = []
+                if tid == current:
+                    btn_row.append(InlineKeyboardButton("✅ 当前", callback_data="noop"))
+                else:
+                    btn_row.append(InlineKeyboardButton(f"切换 {tid}", callback_data=f"task_select:{tid}"))
+                if cfg.get("enabled"):
+                    btn_row.append(InlineKeyboardButton("⏸️ 暂停", callback_data=f"task_disable:{tid}"))
+                else:
+                    btn_row.append(InlineKeyboardButton("▶️ 启用", callback_data=f"task_enable:{tid}"))
+                btn_row.append(InlineKeyboardButton("🗑️ 删除", callback_data=f"task_delete:{tid}"))
+                keyboard.append(btn_row)
+                lines.append("")
+        keyboard.append([InlineKeyboardButton("⬅️ 返回", callback_data="back_task_menu")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=reply_markup)
+
+    async def list_clients_callback(self, query):
+        if not self.scheduler or not self.scheduler.client_pool:
+            await query.edit_message_text("⚠️ 未启用任务调度/客户端池")
+            return
+        items = self.scheduler.client_pool.describe_clients()
+        if not items:
+            await query.edit_message_text("👤 <b>客户端列表</b>\n\n暂无客户端", parse_mode="HTML")
+            return
+        lines = ["👤 <b>客户端列表</b>\n"]
+        keyboard = []
+        for c in items:
+            display_name = c.get('name')
+            internal_name = c.get('internal_name') or display_name
+            username = c.get('username')
+            show_name = f"@{username}" if username else display_name
+            lines.append(f"• <b>{show_name}</b> | api_id=<code>{c.get('api_id')}</code>")
+            lines.append(f"  session: <code>{c.get('session_type')}</code> (<code>{c.get('session_preview')}</code>)")
+            lines.append(f"  状态: {c.get('status')}\n")
+            keyboard.append([InlineKeyboardButton(f"❌ 删除 {show_name}", callback_data=f"del_client_{internal_name}")])
+        keyboard.append([InlineKeyboardButton("⬅️ 返回", callback_data="back_task_menu")])
+        await query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def list_filters_callback(self, query):
         snap = await self.state.snapshot()
-        filters_cfg = snap.get("filters", {})
-        text = self._format_filters(filters_cfg)
-        await query.edit_message_text(text, parse_mode="Markdown")
+        current = snap.get("current_task")
+        if not current:
+            await query.edit_message_text("⚠️ 请先创建并选择任务，再配置筛选条件。", parse_mode="HTML")
+            return
+        filters_cfg = snap.get("tasks", {}).get(current, {}).get("filters", {})
+        text = f"🔍 <b>筛选条件</b>（当前任务：{html.escape(current)}）\n" + self._format_filters(filters_cfg)
+        await query.edit_message_text(text, parse_mode="HTML")
     
     async def _format_settings(self, snap):
         """格式化配置信息"""
-        text = "⚙️ **当前配置**\n\n"
+        text = "⚙️ <b>当前配置</b>\n\n"
         
         listen_chats = snap.get("listen_chats", [])
-        text += f"👥 **监听群组** ({len(listen_chats)}个)\n"
+        text += f"👥 <b>监听群组</b> ({len(listen_chats)}个)\n"
         if listen_chats:
             for chat_id in listen_chats:
                 chat_info = await self._get_chat_info(chat_id)
                 chat_name = chat_info.get('title', f'群组 {chat_id}') if chat_info else f'群组 {chat_id}'
-                text += f"• **{chat_name}** (`{chat_id}`)\n"
+                chat_name_escaped = html.escape(str(chat_name))
+                chat_id_escaped = html.escape(str(chat_id))
+                text += f"• <b>{chat_name_escaped}</b> (<code>{chat_id_escaped}</code>)\n"
         else:
             text += "• 暂无\n"
         text += "\n"
         
         push_chats = snap.get("push_chats", [])
-        text += f"📤 **推送群组** ({len(push_chats)}个)\n"
+        text += f"📤 <b>推送目标</b> ({len(push_chats)}个)\n"
         if push_chats:
             for chat_id in push_chats:
                 chat_info = await self._get_chat_info(chat_id)
-                chat_name = chat_info.get('title', f'群组 {chat_id}') if chat_info else f'群组 {chat_id}'
-                text += f"• **{chat_name}** (`{chat_id}`)\n"
+                if chat_info:
+                    chat_name = chat_info.get('title', f'目标 {chat_id}')
+                    chat_type = chat_info.get('type', 'unknown')
+                    username = chat_info.get('username')
+                    chat_id_display = chat_info.get('id', chat_id)
+                    
+                    # 类型图标和名称
+                    type_info = {
+                        'group': ('👥', '群组'),
+                        'supergroup': ('👥', '群组'),
+                        'channel': ('📢', '频道'),
+                        'private': ('👤', '个人'),
+                        'bot': ('🤖', '机器人')
+                    }.get(chat_type, ('📌', '目标'))
+                    
+                    type_icon, type_name = type_info
+                    chat_name_escaped = html.escape(str(chat_name))
+                    chat_id_escaped = html.escape(str(chat_id_display))
+                    username_str = f" @{html.escape(str(username))}" if username else ""
+                    text += f"• {type_icon} <b>{chat_name_escaped}</b> ({type_name}) <code>{chat_id_escaped}</code>{username_str}\n"
+                else:
+                    chat_id_escaped = html.escape(str(chat_id))
+                    text += f"• 📌 <b>目标</b> (<code>{chat_id_escaped}</code>)\n"
         else:
             text += "• 暂无\n"
         text += "\n"
         
-        text += "🔍 **筛选条件**\n"
+        text += "🔍 <b>筛选条件</b>\n"
         filters_cfg = snap.get("filters", {})
         text += self._format_filters(filters_cfg)
         text += "\n"
         
         return text
+
+    async def _process_ca_bg(self, chain: str, ca: str, task_id: Optional[str] = None):
+        """后台处理 CA，添加超时与异常保护，避免阻塞主流程"""
+        try:
+            await asyncio.wait_for(
+                self.process_ca(chain, ca, False, task_id=task_id),
+                timeout=120.0  # 2分钟超时，防止长期阻塞
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"⏱️  Timeout processing CA {ca[:8]}... (exceeded 120s)")
+        except Exception as e:
+            logger.error(f"❌ Error processing CA {ca[:8]}...: {e}", exc_info=True)
     
     def _format_filters(self, filters_cfg):
         """格式化筛选条件"""
@@ -820,6 +1342,11 @@ class BotApp:
             BotCommand("menu", "查看命令菜单"),
             BotCommand("c", "查询合约地址"),
             BotCommand("settings", "查看当前配置"),
+            BotCommand("add_client", "添加MTProto客户端（管理员）"),
+            BotCommand("add_task", "添加任务（管理员）"),
+            BotCommand("tasks", "查看任务列表（管理员）"),
+            BotCommand("task_pause", "暂停任务（管理员）"),
+            BotCommand("task_resume", "恢复任务（管理员）"),
             BotCommand("add_listen", "添加监听群组（管理员）"),
             BotCommand("del_listen", "删除监听群组（管理员）"),
             BotCommand("list_listen", "查看监听群组列表（管理员）"),
