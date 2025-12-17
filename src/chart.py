@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -252,6 +252,14 @@ def _bars_to_df(bars: List[Dict[str, Any]]) -> pd.DataFrame:
     
     df["Date"] = pd.to_datetime(df["Date"], unit=unit, errors='coerce')
     
+    # 转换为中国时间（UTC+8）
+    if df["Date"].notna().any():
+        # 将时间戳转换为UTC时区，然后转换为中国时间（UTC+8）
+        # 如果时间已经是时区感知的，直接转换；否则先 localize 到 UTC
+        if df["Date"].dt.tz is None:
+            df["Date"] = df["Date"].dt.tz_localize('UTC')
+        df["Date"] = df["Date"].dt.tz_convert('Asia/Shanghai')
+    
     # 设置索引
     df = df.set_index("Date")
     df.index = pd.DatetimeIndex(df.index)
@@ -299,8 +307,9 @@ def _generate_fallback_chart(metrics: TokenMetrics) -> pd.DataFrame:
     
     logger.warning(f"⚠️ Using fallback chart data for price: {current_price}")
     
-    # 生成最近60分钟的数据
-    now = datetime.now()
+    # 生成最近60分钟的数据（使用中国时间）
+    tz_cn = timezone(timedelta(hours=8))
+    now = datetime.now(tz_cn)
     timestamps = [now - timedelta(minutes=i) for i in range(59, -1, -1)]
     
     # 添加随机波动，确保每根K线都有实体（Open != Close）

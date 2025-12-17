@@ -719,11 +719,14 @@ class BotApp:
             [InlineKeyboardButton("➕ 添加任务", callback_data="add_task_prompt")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await message.reply_text(
-            "🗓️ **任务管理**\n\n支持多客户端、多任务定时推送。\n请选择操作：",
-            parse_mode="Markdown",
-            reply_markup=reply_markup
-        )
+        text = "🗓️ <b>任务管理</b>\n\n支持多客户端、多任务定时推送。\n请选择操作："
+        # 判断是 Update 对象还是 CallbackQuery 对象
+        if hasattr(message, 'edit_message_text'):
+            # 是 CallbackQuery，使用 edit_message_text
+            await message.edit_message_text(text, parse_mode="HTML", reply_markup=reply_markup)
+        else:
+            # 是 Message 对象，使用 reply_text
+            await message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
     
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理内联按钮回调"""
@@ -869,6 +872,17 @@ class BotApp:
             ok = await self.state.delete_task(task_id)
             await query.answer("已删除" if ok else "未找到任务")
             await self.list_tasks_callback(query)
+        elif data == "back_task_menu":
+            # 返回到任务管理菜单
+            keyboard = [
+                [InlineKeyboardButton("📋 查看任务", callback_data="list_tasks")],
+                [InlineKeyboardButton("👤 客户端列表", callback_data="list_clients")],
+                [InlineKeyboardButton("➕ 添加客户端", callback_data="add_client_prompt")],
+                [InlineKeyboardButton("➕ 添加任务", callback_data="add_task_prompt")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            text = "🗓️ <b>任务管理</b>\n\n支持多客户端、多任务定时推送。\n请选择操作："
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=reply_markup)
         
     async def handle_setting_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
         """处理设置输入"""
@@ -1187,13 +1201,25 @@ class BotApp:
             lines.append("📋 <b>任务列表</b>\n\n暂无任务")
         else:
             lines.append(f"📋 <b>任务列表</b> ({len(tasks)}个)\n")
+            # 从 task_scheduler 获取任务的 interval_minutes
+            scheduler_tasks = {}
+            if self.scheduler:
+                for st in self.scheduler.list_tasks():
+                    scheduler_tasks[st.get("id")] = st
+            
             for tid, cfg in tasks.items():
                 status = "✅ 启用" if cfg.get("enabled") else "⏸️ 暂停"
                 tag = "（当前）" if tid == current else ""
                 listen_count = len(cfg.get("listen_chats", []))
                 push_count = len(cfg.get("push_chats", []))
+                # 获取定时信息
+                interval_minutes = None
+                if tid in scheduler_tasks:
+                    interval_minutes = scheduler_tasks[tid].get("interval_minutes")
+                
                 lines.append(f"• <b>{html.escape(tid)}</b> {tag} | {status}")
-                lines.append(f"  监听: {listen_count} | 推送: {push_count}")
+                interval_str = f" | ⏰ 每{interval_minutes}分钟" if interval_minutes else ""
+                lines.append(f"  监听: {listen_count} | 推送: {push_count}{interval_str}")
                 btn_row = []
                 if tid == current:
                     btn_row.append(InlineKeyboardButton("✅ 当前", callback_data="noop"))
