@@ -9,7 +9,9 @@ from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from .bot import BotApp, chain_hint
+from telethon import events
+
+from .bot import BotApp, chain_hint, CA_PATTERN
 from .chart import render_chart
 from .client_pool import ClientPool
 from .data_fetcher import DataFetcher
@@ -336,26 +338,17 @@ async def main():
                         is_bot = isinstance(chat_id, str) and chat_id.startswith("@")
                         
                         if is_bot:
-                            # 机器人：使用 MTProto 客户端
+                            # 机器人：使用 MTProto 客户端，只发送纯 CA 文本，不带任何文件
                             if not mtproto_client:
                                 logger.warning(f"⚠️  No MTProto client available, cannot send to bot {chat_id}")
                                 continue
                             
                             payload = ca  # 对机器人仅发送 CA 地址
-                            if photo_buffer:
-                                photo_buffer.seek(0)
-                                await mtproto_client.send_file(
-                                    chat_id, 
-                                    photo_buffer, 
-                                    caption=payload,
-                                    parse_mode="html"
-                                )
-                            else:
-                                await mtproto_client.send_message(
-                                    chat_id, 
-                                    payload,
-                                    parse_mode="html"
-                                )
+                            await mtproto_client.send_message(
+                                chat_id, 
+                                payload,
+                                parse_mode="html"
+                            )
                             logger.info(f"✅ Sent to bot {chat_id} via MTProto")
                         else:
                             # 群组/频道：使用 Bot API
@@ -385,6 +378,59 @@ async def main():
 
     # inject process_ca now that it is defined
     bot_app.process_ca = process_ca
+    
+    # 使用第一个 MTProto 客户端作为群消息监听者（可监听到其他机器人的发言）
+    if client_pool.clients:
+        mt_listener = list(client_pool.clients.values())[0]
+
+        @mt_listener.on(events.NewMessage)
+        async def _mt_on_message(event):
+            try:
+                chat = await event.get_chat()
+                chat_id = getattr(chat, "id", None)
+                if chat_id is None:
+                    return
+                text = event.raw_text or ""
+                if not text:
+                    return
+
+                # 根据任务配置中的 listen_chats 过滤需要处理的任务
+                snap = await state.snapshot()
+                tasks = snap.get("tasks", {})
+                if not tasks:
+                    return
+
+                username = getattr(chat, "username", None)
+                name_keys = []
+                if username:
+                    name_keys.append(f"@{username}")
+
+                matched_tasks: List[str] = []
+                for tid, cfg in tasks.items():
+                    if not cfg.get("enabled"):
+                        continue
+                    listens = cfg.get("listen_chats", [])
+                    if chat_id in listens or any(k in listens for k in name_keys):
+                        matched_tasks.append(tid)
+
+                if not matched_tasks:
+                    return
+
+                logger.info(f"📨 [MTProto] Message received from chat {chat_id} for tasks: {matched_tasks}")
+                found = set(CA_PATTERN.findall(text))
+                if not found:
+                    return
+                logger.info(f"🔍 [MTProto] Found {len(found)} CA(s) in message: {[ca[:8] + '...' for ca in found]}")
+
+                for ca in found:
+                    for tid in matched_tasks:
+                        asyncio.create_task(bot_app._process_ca_bg(chain_hint(ca), ca, task_id=tid))
+            except Exception as e:
+                logger.error(f"❌ MTProto listener error: {e}", exc_info=True)
+
+        logger.info("📥 MTProto 客户端监听已启用（支持监听群内其他机器人消息）")
+    else:
+        logger.info("ℹ️ 未配置 MTProto 客户端，群消息监听仅依赖 Bot API（无法看到其他机器人消息）")
     
     # 启动任务调度器（即便当前没有任务，也保持实例可用，避免 /add_client 等命令提示未启用）
     scheduler = TaskScheduler(client_pool, process_ca)
