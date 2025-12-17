@@ -186,20 +186,30 @@ async def main():
             logger.info(f"📥 Fetching data for {chain} - {ca[:8]}...")
             start_time = asyncio.get_event_loop().time()
             
-            # 并行执行：获取 GMGN 数据 + 获取 60 分钟 K 线 + 获取代币信息
-            # Birdeye 只调用 2 个接口：一个 60 分钟 K 线、一个 token_info（包含可能的创建时间）
-            metrics_task = fetcher.fetch_all(chain, ca)
-            chart_task = fetcher.fetch_chart_by_address(chain, ca, minutes=60)  # 图表显示用60分钟
-            token_info_task = fetcher.fetch_token_info_from_birdeye(chain, ca)
-            
-            # 等待三个任务完成，允许图表和 token_info 失败（使用 return_exceptions=True）
-            results = await asyncio.gather(
-                metrics_task, 
-                chart_task, 
-                token_info_task,
-                return_exceptions=True
-            )
-            metrics, bars, token_info = results
+            # Birdeye 限频 60rpm：将两个 Birdeye 请求串行并加入间隔；GMGN 数据单独异步获取
+            metrics_task = asyncio.create_task(fetcher.fetch_all(chain, ca))
+
+            # 先取 60 分钟 K 线
+            try:
+                bars = await fetcher.fetch_chart_by_address(chain, ca, minutes=60)
+            except Exception as e:
+                error_detail = f"图表数据获取失败（60 分钟 K 线）: {e}"
+                logger.error(error_detail)
+                return None, None, error_detail
+
+            # 控制速率：两次 Birdeye 请求之间加一点间隔（60rpm 上限，预留 1.2s）
+            await asyncio.sleep(1.2)
+
+            # 再取 token_info
+            token_info = None
+            try:
+                token_info = await fetcher.fetch_token_info_from_birdeye(chain, ca)
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to fetch Birdeye token info: {e}")
+                token_info = e  # 保持后续逻辑一致
+
+            # 等待 GMGN 数据
+            metrics = await metrics_task
             
             # 检查是否有异常
             if isinstance(metrics, Exception):
