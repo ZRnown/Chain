@@ -138,6 +138,10 @@ class ClientPool:
         添加客户端并返回最终使用的名称。
         如果未传入 name，则自动使用账号的 username（或 user_id）作为名称。
         """
+        # 确保默认 APP_ID/APP_HASH 已从环境变量加载（即使 tasks.json 不存在也能正常添加）
+        if not self.default_api_id or not self.default_api_hash:
+            self.default_api_id = self.default_api_id or self._env_int("TELEGRAM_API_ID") or self._env_int("APP_ID")
+            self.default_api_hash = self.default_api_hash or os.getenv("TELEGRAM_API_HASH") or os.getenv("APP_HASH")
         if not self.default_api_id or not self.default_api_hash:
             raise ClientConfigError("默认 APP_ID/APP_HASH 未配置，请在 .env 设置 TELEGRAM_API_ID / TELEGRAM_API_HASH")
         
