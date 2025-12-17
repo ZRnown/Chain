@@ -186,47 +186,42 @@ async def main():
             logger.info(f"📥 Fetching data for {chain} - {ca[:8]}...")
             start_time = asyncio.get_event_loop().time()
             
-            # 并行执行：获取GMGN数据 + 获取图表数据 + 获取代币信息（使用地址，不依赖metrics）
-            # 注意：图表数据和代币信息获取需要address，可以在获取metrics之前就开始
-            # 获取更长时间范围的K线（30天）以找到真正的开盘时间，但允许失败（使用 return_exceptions=True）
+            # 并行执行：获取 GMGN 数据 + 获取 60 分钟 K 线 + 获取代币信息
+            # Birdeye 只调用 2 个接口：一个 60 分钟 K 线、一个 token_info（包含可能的创建时间）
             metrics_task = fetcher.fetch_all(chain, ca)
             chart_task = fetcher.fetch_chart_by_address(chain, ca, minutes=60)  # 图表显示用60分钟
-            chart_all_task = fetcher.fetch_chart_by_address(chain, ca, minutes=30*24*60)  # 获取30天的K线用于找开盘时间
             token_info_task = fetcher.fetch_token_info_from_birdeye(chain, ca)
             
-            # 等待四个任务完成，允许 chart_all_task 和 token_info_task 失败（使用 return_exceptions=True）
+            # 等待三个任务完成，允许图表和 token_info 失败（使用 return_exceptions=True）
             results = await asyncio.gather(
                 metrics_task, 
                 chart_task, 
-                chart_all_task, 
                 token_info_task,
                 return_exceptions=True
             )
-            metrics, bars, bars_all, token_info = results
+            metrics, bars, token_info = results
             
             # 检查是否有异常
             if isinstance(metrics, Exception):
                 raise metrics
-            # bars 允许失败，如果失败则设置为 None，后续会生成 fallback 图表
+            # 图表数据现在必须成功，失败则直接返回错误
             if isinstance(bars, Exception):
-                logger.warning(f"⚠️ Failed to fetch chart data (60min): {bars}")
-                bars = None
-            # bars_all 和 token_info 允许失败，设置为 None
-            if isinstance(bars_all, Exception):
-                logger.warning(f"⚠️ Failed to fetch 30-day K-line data: {bars_all}")
-                bars_all = None
+                error_detail = f"图表数据获取失败（60 分钟 K 线）: {bars}"
+                logger.error(error_detail)
+                return None, None, error_detail
+            if not bars:
+                error_detail = "图表数据为空（Birdeye 未返回 60 分钟 K 线），已停止推送"
+                logger.error(error_detail)
+                return None, None, error_detail
+
+            # token_info 允许失败，设置为 None
             if isinstance(token_info, Exception):
                 logger.warning(f"⚠️ Failed to fetch Birdeye token info: {token_info}")
                 token_info = None
             logger.info(f"✅ Data fetched: {metrics.symbol} | Price: ${metrics.price_usd} | MCap: ${metrics.market_cap}")
+            logger.info(f"📈 Chart data: {len(bars)} bars from Birdeye 60 分钟 K 线接口")
             
-            # 处理图表数据结果（允许为空，后续会生成 fallback 图表）
-            if not bars:
-                logger.warning(f"⚠️ Chart data (60min) not available, will use fallback chart")
-            else:
-                logger.info(f"📈 Chart data: {len(bars)} bars from Birdeye API")
-            
-            # 优先从 Birdeye token info 获取代币创建时间，如果没有则从第一个K线提取
+            # 优先从 Birdeye token info 获取代币创建时间
             if token_info:
                 # 尝试从 token_info 中获取创建时间
                 creation_time = None
@@ -247,23 +242,6 @@ async def main():
                 
                 if creation_time:
                     metrics.first_trade_at = creation_time
-            
-            # 如果没有从 token_info 获取到，则从所有K线数据中提取最早的K线时间（真正的开盘时间）
-            if not metrics.first_trade_at and bars_all and len(bars_all) > 0:
-                # bars_all 已经按时间排序，第一个就是最早的K线（代币最开始交易的时间）
-                first_bar_time = bars_all[0].get("t")
-                if first_bar_time:
-                    try:
-                        from datetime import timezone
-                        first_trade_dt = datetime.fromtimestamp(first_bar_time, tz=timezone.utc).replace(tzinfo=None)
-                        # 更新 metrics 的 first_trade_at（优先使用这个作为开盘时间）
-                        metrics.first_trade_at = first_trade_dt
-                        logger.info(f"⏰ First trade time from Birdeye K-line (all history): {first_trade_dt} (timestamp: {first_bar_time})")
-                        if metrics.pool_created_at:
-                            diff_minutes = (first_trade_dt - metrics.pool_created_at).total_seconds() / 60
-                            logger.debug(f"   Time difference from pool_created_at: {diff_minutes:.1f} minutes")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Failed to parse first trade time: {e}")
             
             # 过滤检查
             filters_cfg = await state.filters_cfg(task_id=task_id_in_use)
@@ -302,7 +280,7 @@ async def main():
         
         caption = build_caption(metrics, None if passed else reasons)
 
-        # 生成图表（如果 Birdeye API 失败，使用 fallback 图表）
+        # 生成图表（不再使用 fallback，若失败直接报错）
         logger.info(f"📸 Generating chart for {ca[:8]}...")
         photo_buffer = None
         try:
@@ -310,42 +288,14 @@ async def main():
                 photo_buffer = render_chart(metrics, bars)
                 if photo_buffer:
                     logger.info(f"✅ Chart generated from Birdeye data")
-        except Exception as e:
-            logger.warning(f"⚠️ Chart generation failed: {e}")
-        
-        # 如果图表生成失败或没有数据，使用 fallback
-        if not photo_buffer:
-            logger.warning(f"⚠️ No K-line data available, using fallback chart")
-            try:
-                from .chart import _generate_fallback_chart
-                df_fallback = _generate_fallback_chart(metrics)
-                # 将 DataFrame 转换为 bars 格式
-                bars_fallback = []
-                for idx, row in df_fallback.iterrows():
-                    # 处理时区：如果索引有时区，转换为 UTC 时间戳
-                    ts = idx
-                    if hasattr(ts, 'timestamp'):
-                        ts_value = int(ts.timestamp())
-                    else:
-                        from pandas import Timestamp
-                        ts_value = int(Timestamp(ts).timestamp())
-                    bars_fallback.append({
-                        "t": ts_value,
-                        "o": float(row["Open"]),
-                        "h": float(row["High"]),
-                        "l": float(row["Low"]),
-                        "c": float(row["Close"]),
-                        "v": float(row.get("Volume", 0))
-                    })
-                photo_buffer = render_chart(metrics, bars_fallback)
-                if photo_buffer:
-                    logger.info(f"✅ Fallback chart generated")
                 else:
-                    raise ValueError("Fallback chart generation failed")
-            except Exception as e2:
-                error_msg = f"图表生成失败: {str(e2)}"
-                logger.error(f"❌ {error_msg}")
-                raise ValueError(error_msg)
+                    raise ValueError("图表渲染失败，未生成图片缓冲")
+            else:
+                raise ValueError("图表数据为空，无法生成图表")
+        except Exception as e:
+            error_msg = f"图表生成失败: {str(e)}"
+            logger.error(f"❌ {error_msg}")
+            return None, None, error_msg
         
         # If force_push (manual query), always return result to user
         if force_push:
@@ -426,15 +376,12 @@ async def main():
     # inject process_ca now that it is defined
     bot_app.process_ca = process_ca
     
-    # start scheduler if tasks are configured
+    # 启动任务调度器（即便当前没有任务，也保持实例可用，避免 /add_client 等命令提示未启用）
     scheduler = TaskScheduler(client_pool, process_ca)
     scheduler.load_tasks(client_pool.tasks_config())
-    if scheduler.tasks:
-        await scheduler.start()
-        bot_app.scheduler = scheduler
-        logger.info(f"🗓️  Task scheduler started with {len(scheduler.tasks)} task(s)")
-    else:
-        logger.info("🗓️  No tasks configured; scheduler not started")
+    await scheduler.start()
+    bot_app.scheduler = scheduler
+    logger.info(f"🗓️  Task scheduler started with {len(scheduler.tasks)} task(s)")
     
     snap = await state.snapshot()
     logger.info("=" * 60)
