@@ -872,6 +872,19 @@ class BotApp:
             ok = await self.state.delete_task(task_id)
             await query.answer("已删除" if ok else "未找到任务")
             await self.list_tasks_callback(query)
+        elif data.startswith("task_window:"):
+            task_id = data.split(":", 1)[1]
+            await query.edit_message_text(
+                f"🕒 为任务 <b>{html.escape(task_id)}</b> 设置时间窗\n\n"
+                f"请输入：<code>HH:MM HH:MM</code>\n"
+                f"第一个是开始时间，第二个是结束时间；\n"
+                f"留空或输入 <code>none</code> 代表不限制。\n"
+                f"例：<code>09:00 23:00</code> 或 <code>none 06:00</code>。",
+                parse_mode="HTML"
+            )
+            if not hasattr(context, 'user_data'):
+                context.user_data = {}
+            context.user_data[f'{user_id}_waiting'] = f'set_window:{task_id}'
         elif data == "back_task_menu":
             # 返回到任务管理菜单
             keyboard = [
@@ -993,6 +1006,36 @@ class BotApp:
                     f"已创建数量：{count}",
                     parse_mode="HTML"
                 )
+            elif waiting.startswith('set_window:'):
+                task_id = waiting.split(':', 1)[1]
+                parts = text.strip().split()
+                if len(parts) != 2:
+                    await update.message.reply_text("❌ 请输入两个值：<code>HH:MM HH:MM</code>，或用 <code>none</code> 代表不限制。", parse_mode="HTML")
+                else:
+                    start_raw, end_raw = parts
+                    def norm(val):
+                        if val.lower() in ("none", "null", "无"):
+                            return None
+                        if len(val) == 5 and val[2] == ":" and val[:2].isdigit() and val[3:].isdigit():
+                            h = int(val[:2]); m = int(val[3:])
+                            if 0 <= h < 24 and 0 <= m < 60:
+                                return f"{h:02d}:{m:02d}"
+                        return "invalid"
+                    start_v = norm(start_raw)
+                    end_v = norm(end_raw)
+                    if start_v == "invalid" or end_v == "invalid":
+                        await update.message.reply_text("❌ 时间格式错误，请输入 <code>HH:MM HH:MM</code>，或用 <code>none</code> 代表不限制。", parse_mode="HTML")
+                    else:
+                        await self.state.set_task_window(task_id, start_v, end_v)
+                        if self.scheduler:
+                            for t in self.scheduler.tasks:
+                                if t.get("id") == task_id:
+                                    t["start_time"] = start_v
+                                    t["end_time"] = end_v
+                            self.scheduler.client_pool.update_tasks_config(self.scheduler.tasks)
+                        start_str = start_v or "不限制"
+                        end_str = end_v or "不限制"
+                        await update.message.reply_text(f"✅ 已更新任务时间窗：{start_str} ~ {end_str}", parse_mode="HTML")
             # 清除等待状态
             context.user_data[f'{user_id}_waiting'] = None
         except ValueError:
@@ -1214,12 +1257,27 @@ class BotApp:
                 push_count = len(cfg.get("push_chats", []))
                 # 获取定时信息
                 interval_minutes = None
+                next_run_time = None
+                start_time = cfg.get("start_time")
+                end_time = cfg.get("end_time")
                 if tid in scheduler_tasks:
-                    interval_minutes = scheduler_tasks[tid].get("interval_minutes")
+                    st = scheduler_tasks[tid]
+                    interval_minutes = st.get("interval_minutes")
+                    # 获取下次运行时间（UTC+8）
+                    next_run_ts = st.get("next_run")
+                    if next_run_ts:
+                        from datetime import datetime, timezone, timedelta
+                        tz_shanghai = timezone(timedelta(hours=8))
+                        next_run_dt = datetime.fromtimestamp(next_run_ts, tz=tz_shanghai)
+                        next_run_time = next_run_dt.strftime('%m-%d %H:%M')
                 
                 lines.append(f"• <b>{html.escape(tid)}</b> {tag} | {status}")
                 interval_str = f" | ⏰ 每{interval_minutes}分钟" if interval_minutes else ""
-                lines.append(f"  监听: {listen_count} | 推送: {push_count}{interval_str}")
+                next_run_str = f" | 下次: {next_run_time}" if next_run_time else ""
+                window_str = ""
+                if start_time or end_time:
+                    window_str = f" | 时间窗: {start_time or '--:--'} ~ {end_time or '--:--'}"
+                lines.append(f"  监听: {listen_count} | 推送: {push_count}{interval_str}{next_run_str}{window_str}")
                 btn_row = []
                 if tid == current:
                     btn_row.append(InlineKeyboardButton("✅ 当前", callback_data="noop"))
@@ -1229,6 +1287,7 @@ class BotApp:
                     btn_row.append(InlineKeyboardButton("⏸️ 暂停", callback_data=f"task_disable:{tid}"))
                 else:
                     btn_row.append(InlineKeyboardButton("▶️ 启用", callback_data=f"task_enable:{tid}"))
+                btn_row.append(InlineKeyboardButton("⏰ 设置时间窗", callback_data=f"task_window:{tid}"))
                 btn_row.append(InlineKeyboardButton("🗑️ 删除", callback_data=f"task_delete:{tid}"))
                 keyboard.append(btn_row)
                 lines.append("")

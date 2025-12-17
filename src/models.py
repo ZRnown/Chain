@@ -21,6 +21,7 @@ class TokenMetrics(BaseModel):
     market_cap: Optional[float] = None
     liquidity_usd: Optional[float] = None
     pool_created_at: Optional[datetime] = None
+    first_trade_at: Optional[datetime] = None  # 第一个K线的时间（真正的开盘时间）
     trades_5m: Optional[int] = None
     holders: Optional[int] = None
     top10_ratio: Optional[float] = None

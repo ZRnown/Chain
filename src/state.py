@@ -101,6 +101,8 @@ class StateStore:
                 "listen_chats": [],
                 "push_chats": [],
                 "filters": _filters_to_dict(FilterConfig()),
+                    "start_time": None,
+                    "end_time": None,
             }
 
     async def create_task(self, task_id: str) -> bool:
@@ -218,5 +220,18 @@ class StateStore:
             if not task_id or task_id not in self._state["tasks"]:
                 return _filters_from_dict(_filters_to_dict(FilterConfig()))
             return _filters_from_dict(self._state["tasks"][task_id]["filters"])
+
+    # --- 任务时间窗 ---
+    async def set_task_window(self, task_id: str, start_time: Optional[str], end_time: Optional[str]) -> bool:
+        """
+        start_time/end_time: 字符串 "HH:MM" 或 None
+        """
+        async with self.lock:
+            if task_id not in self._state["tasks"]:
+                return False
+            self._state["tasks"][task_id]["start_time"] = start_time
+            self._state["tasks"][task_id]["end_time"] = end_time
+            await self._write()
+            return True
 
 

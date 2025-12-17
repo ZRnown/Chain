@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 from telethon.errors import RPCError
@@ -10,6 +11,9 @@ from telethon.errors import RPCError
 from .client_pool import ClientPool
 
 logger = logging.getLogger("ca_filter_bot.task_scheduler")
+
+# 中国时区（UTC+8）
+TZ_SHANGHAI = timezone(timedelta(hours=8))
 
 
 class TaskScheduler:
@@ -40,6 +44,8 @@ class TaskScheduler:
                 "interval_minutes": int(t.get("interval_minutes", 5)),
                 "enabled": bool(t.get("enabled", True)),
                 "next_run": now,
+                "start_time": t.get("start_time"),
+                "end_time": t.get("end_time"),
             }
             if not task["id"] or not task["client"] or not task["ca"]:
                 logger.warning(f"⚠️ Skip invalid task config: {t}")
@@ -86,6 +92,8 @@ class TaskScheduler:
                 "targets": t.get("targets", []),
                 "interval_minutes": t.get("interval_minutes", 5),
                 "enabled": t.get("enabled", True),
+                "start_time": t.get("start_time"),
+                "end_time": t.get("end_time"),
             })
         self.client_pool.update_tasks_config(cfg_tasks)
         return True
@@ -116,10 +124,44 @@ class TaskScheduler:
                     continue
                 if now >= task["next_run"]:
                     task["next_run"] = now + task["interval_minutes"] * 60
+                    # 记录任务执行时间（使用中国时区）
+                    next_run_dt = datetime.fromtimestamp(task["next_run"], tz=TZ_SHANGHAI)
+                    logger.info(f"⏰ Task {task['id']} next run: {next_run_dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
                     asyncio.create_task(self._run_task(task))
             await asyncio.sleep(3)
 
     async def _run_task(self, task: Dict[str, Any]):
+        # 检查时间窗（start_time/end_time），格式 HH:MM，本地上海时区
+        if task.get("start_time") or task.get("end_time"):
+            now_dt = datetime.now(TZ_SHANGHAI)
+            now_minutes = now_dt.hour * 60 + now_dt.minute
+            start_minutes = None
+            end_minutes = None
+            try:
+                if task.get("start_time"):
+                    h, m = task["start_time"].split(":")
+                    start_minutes = int(h) * 60 + int(m)
+                if task.get("end_time"):
+                    h, m = task["end_time"].split(":")
+                    end_minutes = int(h) * 60 + int(m)
+            except Exception:
+                logger.warning(f"⚠️ Invalid start/end time format for task {task['id']}: {task.get('start_time')} - {task.get('end_time')}")
+            # 判断是否在时间窗内（支持跨天）
+            if start_minutes is not None and end_minutes is not None:
+                if start_minutes <= end_minutes:
+                    in_window = start_minutes <= now_minutes <= end_minutes
+                else:
+                    in_window = now_minutes >= start_minutes or now_minutes <= end_minutes
+            elif start_minutes is not None:
+                in_window = now_minutes >= start_minutes
+            elif end_minutes is not None:
+                in_window = now_minutes <= end_minutes
+            else:
+                in_window = True
+            if not in_window:
+                logger.info(f"⏸️ Task {task['id']} skipped (out of window {task.get('start_time')}~{task.get('end_time')})")
+                return
+
         client_name = task["client"]
         client = self.client_pool.get_client(client_name)
         if not client:
@@ -130,7 +172,9 @@ class TaskScheduler:
         ca = task["ca"]
         targets = task["targets"]
 
-        logger.info(f"▶️ Task {task['id']} running: {chain} {ca[:8]}..., targets={len(targets)}")
+        # 记录任务执行时间（使用中国时区）
+        run_time = datetime.now(TZ_SHANGHAI)
+        logger.info(f"▶️ Task {task['id']} running at {run_time.strftime('%Y-%m-%d %H:%M:%S %Z')}: {chain} {ca[:8]}..., targets={len(targets)}")
         try:
             photo, caption, error_msg = await self.process_ca(chain, ca, True, task_id=task.get("id"))
             if error_msg:

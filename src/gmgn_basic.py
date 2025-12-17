@@ -153,7 +153,9 @@ class GMGNBasicFetcher:
             swaps = raw_swaps.get("swaps_5m")
             trades_5m = int(swaps or 0)
 
-        # 7. 最大持仓（完全一致：使用前十的一半）
+        # 7. 最大持仓（使用第二大持仓者，但基础接口没有持仓详情，所以使用估算值）
+        # 注意：这里只是估算值，真正的第二大持仓者占比需要从 top holders 接口获取
+        # 如果后续有 top holders 数据，会被覆盖
         max_holder_ratio = top10_ratio / 2.0 if top10_ratio > 0 else 0.0
 
         return TokenMetrics(

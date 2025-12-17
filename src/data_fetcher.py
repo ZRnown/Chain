@@ -40,6 +40,11 @@ class DataFetcher:
         metrics = await self.gmgn_basic.fetch(chain, address)
         if metrics:
             logger.info("✅ GMGN basic interface success")
+            # 即使基础接口成功，也尝试获取 top holders 数据来更新 max_holder_ratio
+            holders_data = await self._fetch_gmgn_top_holders(chain, address)
+            if holders_data and holders_data.get("max_holder_ratio") is not None:
+                metrics.max_holder_ratio = holders_data["max_holder_ratio"]
+                logger.info(f"✅ Updated max_holder_ratio from top holders: {metrics.max_holder_ratio:.4f}")
             return metrics
 
         # 2) GMGN 基础接口失败，尝试全量接口（curl_cffi）
@@ -91,6 +96,42 @@ class DataFetcher:
         )
         return metrics
 
+    async def fetch_token_info_from_birdeye(self, chain: str, address: str) -> Optional[Dict[str, Any]]:
+        """
+        从 Birdeye API 获取代币信息，包括创建时间
+        API: https://public-api.birdeye.so/defi/token_overview
+        """
+        if chain.lower() not in ("solana", "sol"):
+            return None
+        
+        if not self.birdeye_api_key:
+            return None
+        
+        url = "https://public-api.birdeye.so/defi/token_overview"
+        params = {"address": address}
+        headers = {
+            "accept": "application/json",
+            "x-chain": "solana",
+            "X-API-KEY": self.birdeye_api_key,
+        }
+        
+        try:
+            logger.info(f"📊 Fetching Birdeye token info for {address[:8]}...")
+            response = await self.client.get(url, params=params, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("success") and data.get("data"):
+                    token_info = data["data"]
+                    logger.info(f"✅ Birdeye token info fetched")
+                    return token_info
+            else:
+                logger.warning(f"⚠️ Birdeye token info API returned {response.status_code}")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to fetch Birdeye token info: {e}")
+        
+        return None
+    
     async def fetch_chart_by_address(self, chain: str, address: str, minutes: int = 60) -> List[Dict[str, Any]]:
         """
         使用地址直接获取图表数据（用于并行获取，不依赖metrics）
@@ -429,13 +470,23 @@ class DataFetcher:
                             pct = pct / 100
                         top10_sum += pct
                     
-                    if holders_list:
+                    # 获取第二大持仓者的占比（而不是最大的）
+                    if len(holders_list) >= 2:
+                        # 第二大持仓者是索引1（索引0是最大的）
+                        second_max_pct = float(holders_list[1].get("amount_percentage", 0))
+                        if second_max_pct > 1:
+                            second_max_pct = second_max_pct / 100
+                        max_holder = second_max_pct
+                    elif len(holders_list) == 1:
+                        # 如果只有一个持仓者，使用它的值
                         max_pct = float(holders_list[0].get("amount_percentage", 0))
                         if max_pct > 1:
                             max_pct = max_pct / 100
                         max_holder = max_pct
+                    else:
+                        max_holder = 0.0
                     
-                    logger.info(f"✅ GMGN top holders fetched: top10={top10_sum:.4f}, max={max_holder:.4f}")
+                    logger.info(f"✅ GMGN top holders fetched: top10={top10_sum:.4f}, second_max={max_holder:.4f}")
                     return {
                         "top_10_ratio": top10_sum,
                         "max_holder_ratio": max_holder

@@ -25,11 +25,13 @@ def apply_filters(metrics: TokenMetrics, cfg: FilterConfig) -> Tuple[bool, List[
             reasons.append(f"{name} {msg}")
 
     # pool open minutes
+    # 优先使用第一个K线的时间（真正的开盘时间），如果没有则使用 pool_created_at
     if cfg.open_minutes.is_set():
-        if metrics.pool_created_at is None:
+        open_time = metrics.first_trade_at or metrics.pool_created_at
+        if open_time is None:
             reasons.append("open_minutes missing")
         else:
-            minutes = (datetime.utcnow() - metrics.pool_created_at).total_seconds() / 60
+            minutes = (datetime.utcnow() - open_time).total_seconds() / 60
             ok, msg = check_range(minutes, cfg.open_minutes)
             if not ok:
                 reasons.append(f"open_minutes {msg}")
