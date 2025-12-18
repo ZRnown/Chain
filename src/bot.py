@@ -747,9 +747,15 @@ class BotApp:
                 context.user_data = {}
             context.user_data[f'{user_id}_waiting'] = 'add_listen_link'
         elif data.startswith("del_listen_"):
-            chat_id = int(data.split("_")[-1])
-            await self.state.del_listen(chat_id)
-            await query.edit_message_text(f"✅ 已删除监听群: <code>{chat_id}</code>", parse_mode="HTML")
+            # 支持数字ID和@username，不能简单 split 再转 int
+            raw_id = data[len("del_listen_"):]
+            chat_key: object
+            if raw_id.lstrip("-").isdigit():
+                chat_key = int(raw_id)
+            else:
+                chat_key = raw_id  # 例如 @some_bot 或 @channel_name
+            await self.state.del_listen(chat_key)
+            await query.edit_message_text(f"✅ 已删除监听群: <code>{html.escape(str(chat_key))}</code>", parse_mode="HTML")
         elif data == "list_listen":
             await self.list_listen_callback(query)
         elif data == "back_listen":
@@ -768,9 +774,15 @@ class BotApp:
                 context.user_data = {}
             context.user_data[f'{user_id}_waiting'] = 'add_push_link'
         elif data.startswith("del_push_"):
-            chat_id = int(data.split("_")[-1])
-            await self.state.del_push(chat_id)
-            await query.edit_message_text(f"✅ 已删除推送群: <code>{chat_id}</code>", parse_mode="HTML")
+            # 支持数字ID和@username，不能简单 split 再转 int
+            raw_id = data[len("del_push_"):]
+            chat_key: object
+            if raw_id.lstrip("-").isdigit():
+                chat_key = int(raw_id)
+            else:
+                chat_key = raw_id  # 例如 @some_bot 或 @channel_name
+            await self.state.del_push(chat_key)
+            await query.edit_message_text(f"✅ 已删除推送目标: <code>{html.escape(str(chat_key))}</code>", parse_mode="HTML")
         elif data == "list_push":
             await self.list_push_callback(query)
         elif data == "back_push":
