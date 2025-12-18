@@ -394,6 +394,8 @@ async def main():
                 if not text:
                     return
 
+                logger.info(f"📨 [MTProto] Incoming message in chat {chat_id}: {text[:80]!r}")
+
                 # 根据任务配置中的 listen_chats 过滤需要处理的任务
                 snap = await state.snapshot()
                 tasks = snap.get("tasks", {})
@@ -410,7 +412,27 @@ async def main():
                     if not cfg.get("enabled"):
                         continue
                     listens = cfg.get("listen_chats", [])
-                    if chat_id in listens or any(k in listens for k in name_keys):
+                    # 统一成字符串 / 数字集合，并兼容 Bot API 的 -100 前缀形式
+                    listen_keys_str = set()
+                    listen_ids_int = set()
+                    for v in listens:
+                        listen_keys_str.add(str(v))
+                        if isinstance(v, int):
+                            listen_ids_int.add(v)
+                            # 如果是 Bot API 的 -100 前缀群组 ID，提取出 channel_id 形式
+                            s = str(v)
+                            if s.startswith("-100") and len(s) > 4 and s[4:].isdigit():
+                                ch_id = int(s[4:])
+                                listen_ids_int.add(ch_id)
+                                listen_keys_str.add(str(ch_id))
+
+                    chat_id_str = str(chat_id)
+                    # 直接数字匹配 / 字符串匹配 / @username 匹配
+                    if (
+                        chat_id in listen_ids_int
+                        or chat_id_str in listen_keys_str
+                        or any(k in listen_keys_str for k in name_keys)
+                    ):
                         matched_tasks.append(tid)
 
                 if not matched_tasks:

@@ -18,6 +18,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telethon import events
 
 from .state import StateStore
 
@@ -995,6 +996,54 @@ class BotApp:
                     final_name = await self.scheduler.client_pool.add_client(name, session)
                     count = context.user_data.get(f'{user_id}_client_count', 0) + 1
                     context.user_data[f'{user_id}_client_count'] = count
+
+                    # 为新添加的 MTProto 客户端注册消息监听（用于监听群内其他机器人/用户消息）
+                    client = self.scheduler.client_pool.get_client(final_name)
+                    if client:
+                        @client.on(events.NewMessage)
+                        async def _mt_on_message(event):
+                            try:
+                                chat = await event.get_chat()
+                                chat_id = getattr(chat, "id", None)
+                                if chat_id is None:
+                                    return
+                                text_mt = event.raw_text or ""
+                                if not text_mt:
+                                    return
+
+                                snap_mt = await self.state.snapshot()
+                                tasks_mt = snap_mt.get("tasks", {})
+                                if not tasks_mt:
+                                    return
+
+                                username = getattr(chat, "username", None)
+                                name_keys = []
+                                if username:
+                                    name_keys.append(f"@{username}")
+
+                                matched_tasks: List[str] = []
+                                for tid, cfg in tasks_mt.items():
+                                    if not cfg.get("enabled"):
+                                        continue
+                                    listens = cfg.get("listen_chats", [])
+                                    if chat_id in listens or any(k in listens for k in name_keys):
+                                        matched_tasks.append(tid)
+
+                                if not matched_tasks:
+                                    return
+
+                                logger.info(f"📨 [MTProto] Message received from chat {chat_id} for tasks: {matched_tasks}")
+                                found_mt = set(CA_PATTERN.findall(text_mt))
+                                if not found_mt:
+                                    return
+                                logger.info(f"🔍 [MTProto] Found {len(found_mt)} CA(s) in message: {[ca[:8] + '...' for ca in found_mt]}")
+
+                                for ca_mt in found_mt:
+                                    for tid in matched_tasks:
+                                        asyncio.create_task(self._process_ca_bg(chain_hint(ca_mt), ca_mt, task_id=tid))
+                            except Exception as e:
+                                logger.error(f"❌ MTProto listener error (new client): {e}", exc_info=True)
+
                     await update.message.reply_text(
                         f"✅ 客户端已添加：{final_name}（第 {count} 个）\n继续上传文件或发送字符串，完成后输入「完成」"
                     )
