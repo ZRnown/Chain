@@ -52,9 +52,28 @@ def render_chart(
         has_body = (df['Open'] != df['Close']).any()
         logger.debug(f"📊 Has K-line bodies: {has_body}, Total bars: {len(df)}")
     
-    # 截取最近60根（1小时）
-    if len(df) > 60:
-        df = df.iloc[-60:]
+    # 截取/补齐为固定 60 根（1 小时窗口）
+    # - 如果超过 60 根，只保留最近 60 根
+    # - 如果少于 60 根，则在最左侧用“水平”K 线补齐，避免图形被严重拉伸变形
+    TARGET_BARS = 60
+    if len(df) >= TARGET_BARS:
+        df = df.iloc[-TARGET_BARS:]
+    else:
+        pad_count = TARGET_BARS - len(df)
+        first_idx = df.index[0]
+        # 生成补齐用的时间索引（在最左侧，按 1 分钟间隔向前推）
+        pad_index = pd.date_range(
+            end=first_idx - pd.Timedelta(minutes=1),
+            periods=pad_count,
+            freq="1min",
+            tz=first_idx.tz,
+        )
+        first_row = df.iloc[0][["Open", "High", "Low", "Close"]]
+        pad_df = pd.DataFrame(
+            [first_row.to_dict()] * pad_count,
+            index=pad_index,
+        )
+        df = pd.concat([pad_df, df]).sort_index()
     
     # 2. 计算关键数据
     latest_close = float(df["Close"].iloc[-1])
