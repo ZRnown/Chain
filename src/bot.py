@@ -1075,7 +1075,9 @@ class BotApp:
                 else:
                     start_raw, end_raw = parts
                     def norm(val):
-                        if val.lower() in ("none", "null", "无"):
+                        # 支持多种清空方式：none, None, null, Null, 无, 空, 清空
+                        val_lower = val.lower().strip()
+                        if val_lower in ("none", "null", "无", "空", "清空", ""):
                             return None
                         if len(val) == 5 and val[2] == ":" and val[:2].isdigit() and val[3:].isdigit():
                             h = int(val[:2]); m = int(val[3:])

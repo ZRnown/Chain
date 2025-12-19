@@ -25,12 +25,10 @@ class DataFetcher:
         self,
         session: Optional[httpx.AsyncClient] = None,
         gmgn_headers: Optional[Dict[str, str]] = None,
-        birdeye_api_key: Optional[str] = None,
     ):
         # verify=False 仅用于调试，生产环境建议设为 True
         self.client = session or httpx.AsyncClient(timeout=15, verify=True)
         self.gmgn_headers = gmgn_headers or {}
-        self.birdeye_api_key = birdeye_api_key
         self.gmgn_basic = GMGNBasicFetcher(extra_headers=self.gmgn_headers)
 
     async def fetch_all(self, chain: str, address: str) -> TokenMetrics:
@@ -96,178 +94,126 @@ class DataFetcher:
         )
         return metrics
 
-    async def fetch_token_info_from_birdeye(self, chain: str, address: str) -> Optional[Dict[str, Any]]:
+    # --- GeckoTerminal OHLCV（1m，1小时内） ---
+    def _gecko_network(self, chain: str) -> Optional[str]:
         """
-        从 Birdeye API 获取代币信息，包括创建时间
-        API: https://public-api.birdeye.so/defi/token_overview
+        将内部链名称映射到 GeckoTerminal 的 network 参数。
+        目前主要支持：Solana、BSC，其他链可按需扩展。
         """
-        if chain.lower() not in ("solana", "sol"):
-            return None
-        
-        if not self.birdeye_api_key:
-            return None
-        
-        url = "https://public-api.birdeye.so/defi/token_overview"
-        params = {"address": address}
-        headers = {
-            "accept": "application/json",
-            "x-chain": "solana",
-            "X-API-KEY": self.birdeye_api_key,
-        }
-        
-        try:
-            logger.info(f"📊 Fetching Birdeye token info for {address[:8]}...")
-            response = await self.client.get(url, params=params, headers=headers, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("success") and data.get("data"):
-                    token_info = data["data"]
-                    logger.info(f"✅ Birdeye token info fetched")
-                    return token_info
-            else:
-                logger.warning(f"⚠️ Birdeye token info API returned {response.status_code}")
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to fetch Birdeye token info: {e}")
-        
+        c = chain.lower()
+        if c in ("sol", "solana"):
+            return "solana"
+        if c in ("bsc", "bscscan", "bnb"):
+            return "bsc"
+        if c in ("eth", "ethereum"):
+            return "eth"
         return None
     
     async def fetch_chart_by_address(self, chain: str, address: str, minutes: int = 60) -> List[Dict[str, Any]]:
         """
-        使用地址直接获取图表数据（用于并行获取，不依赖metrics）
+        使用 GeckoTerminal API 获取 K 线数据。
+        返回格式: {t, o, h, l, c, v}
         """
-        try:
-            return await self._fetch_birdeye_ohlcv(chain, address, minutes)
-        except Exception as e:
-            logger.warning(f"❌ Chart fetch failed: {e}")
-            return []
+        return await self._fetch_gecko_ohlcv(chain, address, minutes)
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=0.5, min=0.5, max=4))
     async def fetch_chart(self, metrics: TokenMetrics, minutes: int = 60) -> List[Dict[str, Any]]:
         """
-        使用 Birdeye API 获取 K 线数据
-        API: https://public-api.birdeye.so/defi/ohlcv
-        格式: {t (unixTime), o, h, l, c, v}
-        
-        如果 API 失败，抛出异常而不是返回空列表
+        使用 GeckoTerminal API 获取 K 线数据（兼容旧接口）。
         """
-        return await self._fetch_birdeye_ohlcv(metrics.chain, metrics.address, minutes)
+        return await self.fetch_chart_by_address(metrics.chain, metrics.address, minutes)
     
-    async def _fetch_birdeye_ohlcv(self, chain: str, address: str, minutes: int) -> List[Dict[str, Any]]:
+    async def _fetch_gecko_ohlcv(self, chain: str, address: str, minutes: int) -> List[Dict[str, Any]]:
         """
-        内部方法：使用 Birdeye API 获取 K 线数据
+        内部方法：使用 GeckoTerminal API 获取 1m K 线数据（最近 minutes 分钟，通常 60）。
+        文档示例：
+        1) /api/v2/networks/{network}/tokens/{token}/pools  -> 获取池子
+        2) /api/v2/networks/{network}/pools/{pool}/ohlcv/minute?aggregate=1&limit=60&currency=usd
         """
-        # 只支持 Solana
-        if chain.lower() not in ("solana", "sol"):
-            raise ValueError(f"Birdeye API only supports Solana chain, got: {chain}")
+        network = self._gecko_network(chain)
+        if not network:
+            raise ValueError(f"GeckoTerminal does not support chain: {chain}")
         
-        # 检查 API Key
-        if not self.birdeye_api_key:
-            raise ValueError("BIRDEYE_API_KEY is required but not configured. Please set it in .env file")
+        # 1. 根据 token 找到池子（取第一个）
+        pools_url = f"https://api.geckoterminal.com/api/v2/networks/{network}/tokens/{address}/pools"
+        logger.info(f"📊 Fetching GeckoTerminal pools for {address[:8]}... (network={network})")
+        try:
+            pools_resp = await self.client.get(pools_url, timeout=10)
+            pools_resp.raise_for_status()
+            pools_data = pools_resp.json()
+        except Exception as e:
+            logger.warning(f"⚠️ GeckoTerminal pools API failed: {e}")
+            raise ValueError(f"GeckoTerminal: failed to fetch pools - {str(e)}")
         
-        # Birdeye OHLCV API
-        url = "https://public-api.birdeye.so/defi/ohlcv"
+        pool_list = pools_data.get("data") or []
+        if not pool_list:
+            raise ValueError("GeckoTerminal: no pools found for token")
         
-        # 计算时间范围（秒级时间戳）
-        now = int(datetime.now(timezone.utc).timestamp())
-        time_from = now - (minutes * 60)
+        pool_attrs = pool_list[0].get("attributes") or {}
+        pool_address = pool_attrs.get("address")
+        if not pool_address:
+            raise ValueError("GeckoTerminal: pool address missing in response")
         
-        params = {
-            "address": address,
-            "type": "1m",  # 1分钟K线
-            "time_from": time_from,
-            "time_to": now,
-        }
+        logger.info(f"✅ GeckoTerminal pool selected: {pool_address}")
         
-        headers = {
-            "accept": "application/json",
-            "x-chain": "solana",
-            "X-API-KEY": self.birdeye_api_key,
-        }
+        # 2. 获取该池子的分钟 OHLCV（limit=minutes，最多60）
+        limit = min(max(minutes, 1), 60)
+        ohlcv_url = (
+            f"https://api.geckoterminal.com/api/v2/networks/{network}/pools/"
+            f"{pool_address}/ohlcv/minute?aggregate=1&limit={limit}&currency=usd"
+        )
+        logger.info(f"📊 Fetching GeckoTerminal OHLCV (1m, last {limit} bars)...")
+        try:
+            k_resp = await self.client.get(ohlcv_url, timeout=10)
+            k_resp.raise_for_status()
+            k_data = k_resp.json()
+        except Exception as e:
+            logger.warning(f"⚠️ GeckoTerminal OHLCV API failed: {e}")
+            raise ValueError(f"GeckoTerminal: failed to fetch OHLCV - {str(e)}")
         
-        logger.info(f"📊 Fetching Birdeye OHLCV data for {address[:8]}... (from {time_from} to {now})")
-        response = await self.client.get(url, params=params, headers=headers)
+        attrs = (k_data.get("data") or {}).get("attributes") or {}
+        ohlcv_list = attrs.get("ohlcv_list") or []
+        if not ohlcv_list:
+            raise ValueError("GeckoTerminal: ohlcv_list is empty")
         
-        if response.status_code == 200:
-            data = response.json()
-            logger.debug(f"📊 Birdeye response keys: {list(data.keys())}")
-            
-            # 检查响应格式
-            if not data.get("success"):
-                error_msg = f"Birdeye API returned success=false: {data.get('message', 'Unknown error')}"
-                logger.error(f"❌ {error_msg}")
-                raise ValueError(error_msg)
-            
-            # 尝试多种可能的响应格式
-            items = None
-            if "data" in data:
-                if isinstance(data["data"], list):
-                    items = data["data"]
-                elif isinstance(data["data"], dict):
-                    items = data["data"].get("items") or data["data"].get("data") or data["data"].get("ohlcv_list")
-            
-            if not items:
-                error_msg = f"Birdeye API returned no data items. Response structure: {list(data.keys())}"
-                logger.error(f"❌ {error_msg}")
-                if "data" in data:
-                    logger.debug(f"   data type: {type(data['data'])}, keys: {list(data['data'].keys()) if isinstance(data['data'], dict) else 'N/A'}")
-                raise ValueError(error_msg)
-            
-            # 转换为标准格式: {t, o, h, l, c, v}
-            bars = []
-            for item in items:
-                # 处理不同的字段名格式
-                unix_time = item.get("unixTime") or item.get("t") or item.get("time") or item.get("timestamp")
-                open_price = item.get("o") or item.get("open")
-                high_price = item.get("h") or item.get("high")
-                low_price = item.get("l") or item.get("low")
-                close_price = item.get("c") or item.get("close")
-                volume = item.get("v") or item.get("volume") or 0
-                
-                # 验证必需字段
-                if unix_time is None or open_price is None or high_price is None or low_price is None or close_price is None:
-                    logger.debug(f"⚠️ Skipping invalid bar: {item}")
-                    continue
-                
-                bars.append({
-                    "t": int(unix_time),  # 时间戳（秒）
-                    "o": float(open_price),  # 开盘价
-                    "h": float(high_price),  # 最高价
-                    "l": float(low_price),  # 最低价
-                    "c": float(close_price),  # 收盘价
-                    "v": float(volume),  # 成交量
-                })
-            
-            if bars:
-                logger.info(f"✅ Birdeye OHLCV: fetched {len(bars)} bars (from {bars[0]['t']} to {bars[-1]['t']})")
-                # 按时间排序
-                bars.sort(key=lambda x: x["t"])
-                return bars
-            else:
-                error_msg = "Birdeye API returned data but no valid bars after conversion"
-                logger.error(f"❌ {error_msg}")
-                raise ValueError(error_msg)
-                
-        elif response.status_code == 401:
-            error_msg = "Birdeye API: Unauthorized - Invalid or missing API key"
-            logger.error(f"❌ {error_msg}")
-            raise ValueError(error_msg)
-        elif response.status_code == 403:
-            error_msg = "Birdeye API: Forbidden - Access denied"
-            logger.error(f"❌ {error_msg}")
-            raise ValueError(error_msg)
-        elif response.status_code == 429:
-            error_msg = "Birdeye API: Rate limit exceeded - Please try again later"
-            logger.error(f"❌ {error_msg}")
-            raise ValueError(error_msg)
-        else:
+        bars: List[Dict[str, Any]] = []
+        for item in ohlcv_list:
+            # 预期格式: [timestamp, open, high, low, close, volume]
+            if not isinstance(item, (list, tuple)) or len(item) < 5:
+                logger.debug(f"⚠️ Skipping invalid Gecko bar: {item}")
+                continue
+            ts = item[0]
+            o, h, l, c = item[1], item[2], item[3], item[4]
+            v = item[5] if len(item) > 5 else 0
             try:
-                error_text = response.text[:500]
-                error_msg = f"Birdeye API HTTP {response.status_code}: {error_text}"
-            except:
-                error_msg = f"Birdeye API HTTP {response.status_code}: Unknown error"
-            logger.error(f"❌ {error_msg}")
-            raise ValueError(error_msg)
+                bars.append(
+                    {
+                        "t": int(ts),        # 秒级时间戳
+                        "o": float(o),
+                        "h": float(h),
+                        "l": float(l),
+                        "c": float(c),
+                        "v": float(v),
+                    }
+                )
+            except Exception:
+                logger.debug(f"⚠️ Failed to convert Gecko bar: {item}")
+                continue
+        
+        if not bars:
+            raise ValueError("GeckoTerminal: no valid bars after conversion")
+        
+        # Gecko 返回通常是按时间升序或降序，这里统一按时间排序
+        bars.sort(key=lambda x: x["t"])
+        
+        # 只保留最近60根K线（1小时）
+        if len(bars) > 60:
+            bars = bars[-60:]
+            logger.info(f"⚠️ GeckoTerminal returned {len(bars)} bars, keeping only last 60 bars")
+        
+        logger.info(f"✅ GeckoTerminal OHLCV: fetched {len(bars)} bars "
+                    f"(from {bars[0]['t']} to {bars[-1]['t']})")
+        return bars
 
     def _get_gmgn_headers(self, referer_path: str) -> Dict[str, str]:
         """构造高仿浏览器头（参考用户提供的方案）"""
@@ -324,11 +270,8 @@ class DataFetcher:
                 timeout=10
             )
             
-            logger.info(f"📡 GMGN token info response: {resp.status_code}")
-            
             if resp.status_code == 200:
                 data = resp.json()
-                logger.debug(f"📦 GMGN response data keys: {list(data.keys())}")
                 
                 if data.get("code") == 0:
                     token = data.get("data", {}).get("token", {})
@@ -341,7 +284,6 @@ class DataFetcher:
                     logger.warning(f"⚠️  GMGN API error: code={data.get('code')}, msg={data.get('msg')}")
             elif resp.status_code == 403:
                 logger.warning(f"🚫 GMGN Token Info 403 Blocked (attempt {attempt + 1})")
-                logger.debug(f"Response preview: {resp.text[:200]}")
                 # 403错误，切换指纹重试
                 if attempt < len(fingerprints) - 1:
                     logger.info(f"🔄 Switching fingerprint due to 403")
@@ -397,7 +339,6 @@ class DataFetcher:
                 timeout=10
             )
             
-            logger.info(f"📡 GMGN basic info response: {resp.status_code}")
             
             if resp.status_code == 200:
                 data = resp.json()

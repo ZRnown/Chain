@@ -36,8 +36,22 @@ def format_time_ago(dt) -> str:
         return "N/A"
     from datetime import datetime
     now = datetime.utcnow()
+    
+    # 验证时间合理性：不能是1970年之前或未来时间
+    if dt < datetime(2020, 1, 1) or dt > now:
+        # 如果是未来时间，返回"刚刚"
+        if dt > now:
+            return "刚刚"
+        # 如果是很早的时间（可能是错误的时间戳），返回"N/A"
+        return "N/A"
+    
     diff = now - dt
     total_minutes = int(diff.total_seconds() / 60)
+    
+    # 如果时间差为负数或异常大，返回"N/A"
+    if total_minutes < 0 or total_minutes > 1000000:  # 约694天
+        return "N/A"
+    
     if total_minutes < 60:
         return f"{total_minutes}分钟"
     hours = total_minutes // 60

@@ -1,11 +1,10 @@
 """
 Simple HTML -> Telegram entity parser.
 """
-import struct
 from collections import deque
 from html import escape
 from html.parser import HTMLParser
-from typing import Iterable, Optional, Tuple, List
+from typing import Iterable, Tuple, List
 
 from ..helpers import add_surrogate, del_surrogate, within_surrogate, strip_text
 from ..tl import TLObject
@@ -14,7 +13,7 @@ from ..tl.types import (
     MessageEntityPre, MessageEntityEmail, MessageEntityUrl,
     MessageEntityTextUrl, MessageEntityMentionName,
     MessageEntityUnderline, MessageEntityStrike, MessageEntityBlockquote,
-    TypeMessageEntity
+    MessageEntityCustomEmoji, TypeMessageEntity
 )
 
 
@@ -79,7 +78,15 @@ class HTMLToTelegramParser(HTMLParser):
                     url = None
             self._open_tags_meta.popleft()
             self._open_tags_meta.appendleft(url)
+        elif tag == 'tg-emoji':
+            try:
+                emoji_id = int(attrs['emoji-id'])
+            except (KeyError, ValueError):
+                return
 
+            EntityType = MessageEntityCustomEmoji
+            args['document_id'] = emoji_id
+            
         if EntityType and tag not in self._building_entities:
             self._building_entities[tag] = EntityType(
                 offset=len(self.text),
@@ -147,6 +154,7 @@ ENTITY_TO_FORMATTER = {
     MessageEntityUrl: lambda _, t: ('<a href="{}">'.format(t), '</a>'),
     MessageEntityTextUrl: lambda e, _: ('<a href="{}">'.format(escape(e.url)), '</a>'),
     MessageEntityMentionName: lambda e, _: ('<a href="tg://user?id={}">'.format(e.user_id), '</a>'),
+    MessageEntityCustomEmoji: lambda e, _: ('<tg-emoji emoji-id="{}">'.format(e.document_id), '</tg-emoji>'),
 }
 
 

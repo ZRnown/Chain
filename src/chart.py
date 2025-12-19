@@ -30,10 +30,8 @@ def render_chart(
     logger = logging.getLogger("ca_filter_bot.chart")
     
     # 1. 数据转换
-    logger.info(f"📊 Rendering chart: {len(bars)} bars provided, price: ${metrics.price_usd}")
-    
     if not bars:
-        error_msg = "No chart data provided - Birdeye API failed to return data"
+        error_msg = "No chart data provided - API failed to return data"
         logger.error(f"❌ {error_msg}")
         raise ValueError(error_msg)
     
@@ -44,42 +42,45 @@ def render_chart(
         logger.error(f"❌ {error_msg}")
         raise ValueError(error_msg)
     
-    # 调试：检查数据
-    if len(df) > 0:
-        sample = df.iloc[0]
-        logger.debug(f"📊 Sample K-line: O={sample['Open']:.8f}, H={sample['High']:.8f}, L={sample['Low']:.8f}, C={sample['Close']:.8f}")
-        # 检查是否有实体（Open != Close）
-        has_body = (df['Open'] != df['Close']).any()
-        logger.debug(f"📊 Has K-line bodies: {has_body}, Total bars: {len(df)}")
-    
-    # 截取/补齐为固定 60 根（1 小时窗口）
+    # 固定显示1小时窗口（60根K线）
     # - 如果超过 60 根，只保留最近 60 根
-    # - 如果少于 60 根，则在最左侧用“水平”K 线补齐，避免图形被严重拉伸变形
+    # - 如果少于 60 根，补齐时间范围到1小时，但补齐的部分不显示K线（显示空白）
     TARGET_BARS = 60
     if len(df) >= TARGET_BARS:
         df = df.iloc[-TARGET_BARS:]
     else:
-        pad_count = TARGET_BARS - len(df)
-        first_idx = df.index[0]
-        # 生成补齐用的时间索引（在最左侧，按 1 分钟间隔向前推）
-        pad_index = pd.date_range(
-            end=first_idx - pd.Timedelta(minutes=1),
-            periods=pad_count,
-            freq="1min",
-            tz=first_idx.tz,
-        )
-        first_row = df.iloc[0][["Open", "High", "Low", "Close"]]
-        pad_df = pd.DataFrame(
-            [first_row.to_dict()] * pad_count,
-            index=pad_index,
-        )
-        df = pd.concat([pad_df, df]).sort_index()
+        # 如果少于60根，需要补齐时间范围到1小时
+        # 计算最后一根K线的时间
+        last_time = df.index[-1]
+        # 计算1小时前的时间
+        one_hour_before = last_time - pd.Timedelta(hours=1)
+        # 创建完整1小时的时间索引（每分钟一个）
+        full_hour_index = pd.date_range(start=one_hour_before, end=last_time, freq='1min')
+        # 重新索引，补齐缺失的时间点（缺失的用NaN填充）
+        df = df.reindex(full_hour_index)
+        # 补齐的部分会自动是NaN，不会显示K线，但保持时间范围是完整的1小时
     
     # 2. 计算关键数据
     latest_close = float(df["Close"].iloc[-1])
-    first_open = float(df["Open"].iloc[0])
-    change_amt = latest_close - first_open
-    change_pct = (change_amt / first_open * 100) if first_open != 0 else 0
+    # 找到第一根有效的K线（不是NaN）
+    first_valid_idx = None
+    for idx in range(len(df)):
+        if pd.notna(df["Open"].iloc[idx]) and pd.notna(df["Close"].iloc[idx]):
+            first_valid_idx = idx
+            break
+    
+    if first_valid_idx is None:
+        # 如果没有有效数据，使用默认值
+        first_open = latest_close
+        change_pct = 0.0
+    else:
+        first_open = float(df["Open"].iloc[first_valid_idx])
+        change_amt = latest_close - first_open
+        change_pct = (change_amt / first_open * 100) if first_open != 0 else 0.0
+    
+    # 确保 change_pct 是有效数值
+    if pd.isna(change_pct) or not isinstance(change_pct, (int, float)):
+        change_pct = 0.0
     
     # 3. 颜色定义（涨绿跌红）
     COLOR_UP = "#089981"    # 涨：绿色
@@ -92,6 +93,7 @@ def render_chart(
     
     # 4. 创建市场颜色配置
     # 关键：确保K线实体有颜色，不是空心
+    # 使用 'filled' 模式确保实体填充
     mc = mpf.make_marketcolors(
         up=COLOR_UP,      # 涨：绿色实体
         down=COLOR_DOWN,  # 跌：红色实体
@@ -99,7 +101,8 @@ def render_chart(
         wick={'up': COLOR_UP, 'down': COLOR_DOWN},  # 影线颜色
         volume={'up': COLOR_UP + "80", 'down': COLOR_DOWN + "80"},  # 成交量（带透明度）
         ohlc='i',  # 继承涨跌色
-        alpha=1.0  # 完全不透明，确保实体可见
+        alpha=1.0,  # 完全不透明，确保实体可见
+        inherit=True  # 继承基础样式
     )
     
     # 5. 创建样式
@@ -126,28 +129,30 @@ def render_chart(
     # 确保列顺序正确：Open, High, Low, Close
     df_plot = df[['Open', 'High', 'Low', 'Close']].copy()
     
-    # 调试：打印前几行数据
-    if len(df_plot) > 0:
-        logger.debug(f"📊 First 3 rows:\n{df_plot.head(3)}")
-        logger.debug(f"📊 Data types: {df_plot.dtypes}")
-        logger.debug(f"📊 Open != Close count: {(df_plot['Open'] != df_plot['Close']).sum()}/{len(df_plot)}")
-    
     # 7. 绘制K线图（不显示成交量）
-    fig, axlist = mpf.plot(
-        df_plot,
-        type='candle',  # 标准K线图
-        volume=False,  # 不显示成交量
-        style=style,
-        figsize=(10, 6),
-        datetime_format='%H:%M',
-        xrotation=0,
-        ylabel='',
-        scale_width_adjustment=dict(candle=1.2),
-        tight_layout=True,
-        returnfig=True,
-        show_nontrading=False,
-        warn_too_much_data=10000
-    )
+    try:
+        fig, axlist = mpf.plot(
+            df_plot,
+            type='candle',  # 标准K线图
+            volume=False,  # 不显示成交量
+            style=style,
+            figsize=(10, 6),
+            datetime_format='%H:%M',
+            xrotation=0,
+            ylabel='',
+            scale_width_adjustment=dict(candle=1),  # 减小宽度，避免重叠
+            tight_layout=True,
+            returnfig=True,
+            show_nontrading=False,
+            warn_too_much_data=10000,
+            update_width_config=dict(
+                candle_linewidth=1,  # 适中线宽
+                candle_width=0.9,  # 减小 K 线宽度，避免重叠
+            )
+        )
+    except Exception as e:
+        logger.error(f"❌ mplfinance plot failed: {e}", exc_info=True)
+        raise
     
     ax_main = axlist[0]  # K线图主图
     
@@ -165,6 +170,11 @@ def render_chart(
     
     ax_main.yaxis.set_major_formatter(ticker.FuncFormatter(price_fmt))
     ax_main.yaxis.tick_right()  # 价格在右侧
+    
+    # 8.5. 固定X轴为1小时范围（即使数据少于60根）
+    # mplfinance 使用整数索引（0, 1, 2...），所以固定显示60个位置
+    # 确保X轴始终显示60个位置（0-59），对应1小时
+    ax_main.set_xlim([-0.5, 59.5])
     
     # 9. 左上角信息框（小尺寸，避免被蜡烛图遮挡）
     # 使用半透明背景框，确保文字清晰可见

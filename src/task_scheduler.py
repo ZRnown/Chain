@@ -122,6 +122,9 @@ class TaskScheduler:
             for task in self.tasks:
                 if not task["enabled"]:
                     continue
+                # 检查时间窗（在调度时也检查，避免在时间窗外设置 next_run）
+                if not self._is_in_time_window(task):
+                    continue
                 if now >= task["next_run"]:
                     task["next_run"] = now + task["interval_minutes"] * 60
                     # 记录任务执行时间（使用中国时区）
@@ -129,38 +132,46 @@ class TaskScheduler:
                     logger.info(f"⏰ Task {task['id']} next run: {next_run_dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
                     asyncio.create_task(self._run_task(task))
             await asyncio.sleep(3)
+    
+    def _is_in_time_window(self, task: Dict[str, Any]) -> bool:
+        """检查任务是否在时间窗内"""
+        if not task.get("start_time") and not task.get("end_time"):
+            return True  # 没有设置时间窗，始终允许
+        
+        now_dt = datetime.now(TZ_SHANGHAI)
+        now_minutes = now_dt.hour * 60 + now_dt.minute
+        start_minutes = None
+        end_minutes = None
+        
+        try:
+            if task.get("start_time"):
+                h, m = task["start_time"].split(":")
+                start_minutes = int(h) * 60 + int(m)
+            if task.get("end_time"):
+                h, m = task["end_time"].split(":")
+                end_minutes = int(h) * 60 + int(m)
+        except Exception:
+            logger.warning(f"⚠️ Invalid start/end time format for task {task['id']}: {task.get('start_time')} - {task.get('end_time')}")
+            return True  # 格式错误时允许运行，避免阻塞
+        
+        # 判断是否在时间窗内（支持跨天）
+        if start_minutes is not None and end_minutes is not None:
+            if start_minutes <= end_minutes:
+                return start_minutes <= now_minutes <= end_minutes
+            else:
+                return now_minutes >= start_minutes or now_minutes <= end_minutes
+        elif start_minutes is not None:
+            return now_minutes >= start_minutes
+        elif end_minutes is not None:
+            return now_minutes <= end_minutes
+        else:
+            return True
 
     async def _run_task(self, task: Dict[str, Any]):
-        # 检查时间窗（start_time/end_time），格式 HH:MM，本地上海时区
-        if task.get("start_time") or task.get("end_time"):
-            now_dt = datetime.now(TZ_SHANGHAI)
-            now_minutes = now_dt.hour * 60 + now_dt.minute
-            start_minutes = None
-            end_minutes = None
-            try:
-                if task.get("start_time"):
-                    h, m = task["start_time"].split(":")
-                    start_minutes = int(h) * 60 + int(m)
-                if task.get("end_time"):
-                    h, m = task["end_time"].split(":")
-                    end_minutes = int(h) * 60 + int(m)
-            except Exception:
-                logger.warning(f"⚠️ Invalid start/end time format for task {task['id']}: {task.get('start_time')} - {task.get('end_time')}")
-            # 判断是否在时间窗内（支持跨天）
-            if start_minutes is not None and end_minutes is not None:
-                if start_minutes <= end_minutes:
-                    in_window = start_minutes <= now_minutes <= end_minutes
-                else:
-                    in_window = now_minutes >= start_minutes or now_minutes <= end_minutes
-            elif start_minutes is not None:
-                in_window = now_minutes >= start_minutes
-            elif end_minutes is not None:
-                in_window = now_minutes <= end_minutes
-            else:
-                in_window = True
-            if not in_window:
-                logger.info(f"⏸️ Task {task['id']} skipped (out of window {task.get('start_time')}~{task.get('end_time')})")
-                return
+        # 再次检查时间窗（双重检查，确保在时间窗内）
+        if not self._is_in_time_window(task):
+            logger.info(f"⏸️ Task {task['id']} skipped (out of window {task.get('start_time')}~{task.get('end_time')})")
+            return
 
         client_name = task["client"]
         client = self.client_pool.get_client(client_name)

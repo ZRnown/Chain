@@ -124,12 +124,6 @@ async def main():
     if not gmgn_headers:
         logger.warning("⚠️  GMGN headers not configured, may have limited access")
     
-    # Birdeye API Key (required for chart data)
-    birdeye_api_key = os.getenv("BIRDEYE_API_KEY")
-    if not birdeye_api_key:
-        logger.warning("⚠️  BIRDEYE_API_KEY not configured, chart generation will fail")
-    else:
-        logger.info("✅ Birdeye API Key configured")
     
     # Admin IDs
     admin_ids_str = os.getenv("ADMIN_IDS", "")
@@ -147,7 +141,6 @@ async def main():
 
     fetcher = DataFetcher(
         gmgn_headers=gmgn_headers,
-        birdeye_api_key=birdeye_api_key,
     )
     logger.info("📡 DataFetcher initialized")
     
@@ -188,27 +181,17 @@ async def main():
             logger.info(f"📥 Fetching data for {chain} - {ca[:8]}...")
             start_time = asyncio.get_event_loop().time()
             
-            # Birdeye 限频 60rpm：将两个 Birdeye 请求串行并加入间隔；GMGN 数据单独异步获取
+            # GMGN 基础数据 + GeckoTerminal K线
             metrics_task = asyncio.create_task(fetcher.fetch_all(chain, ca))
-
-            # 先取 60 分钟 K 线
+            
+            # GeckoTerminal：1小时 1m K 线
             try:
                 bars = await fetcher.fetch_chart_by_address(chain, ca, minutes=60)
             except Exception as e:
-                error_detail = f"图表数据获取失败（60 分钟 K 线）: {e}"
+                error_detail = f"图表数据获取失败（GeckoTerminal API 失败）: {str(e)}"
                 logger.error(error_detail)
+                logger.debug(f"GeckoTerminal error details:", exc_info=True)
                 return None, None, error_detail
-
-            # 控制速率：两次 Birdeye 请求之间加一点间隔（60rpm 上限，预留 1.2s）
-            await asyncio.sleep(1.2)
-
-            # 再取 token_info
-            token_info = None
-            try:
-                token_info = await fetcher.fetch_token_info_from_birdeye(chain, ca)
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to fetch Birdeye token info: {e}")
-                token_info = e  # 保持后续逻辑一致
 
             # 等待 GMGN 数据
             metrics = await metrics_task
@@ -216,44 +199,27 @@ async def main():
             # 检查是否有异常
             if isinstance(metrics, Exception):
                 raise metrics
-            # 图表数据现在必须成功，失败则直接返回错误
-            if isinstance(bars, Exception):
-                error_detail = f"图表数据获取失败（60 分钟 K 线）: {bars}"
-                logger.error(error_detail)
-                return None, None, error_detail
             if not bars:
-                error_detail = "图表数据为空（Birdeye 未返回 60 分钟 K 线），已停止推送"
+                error_detail = "图表数据为空（未返回 60 分钟 1m K 线），已停止推送"
                 logger.error(error_detail)
                 return None, None, error_detail
-
-            # token_info 允许失败，设置为 None
-            if isinstance(token_info, Exception):
-                logger.warning(f"⚠️ Failed to fetch Birdeye token info: {token_info}")
-                token_info = None
             logger.info(f"✅ Data fetched: {metrics.symbol} | Price: ${metrics.price_usd} | MCap: ${metrics.market_cap}")
-            logger.info(f"📈 Chart data: {len(bars)} bars from Birdeye 60 分钟 K 线接口")
+            logger.info(f"📈 Chart data: {len(bars)} bars from GeckoTerminal")
             
-            # 优先从 Birdeye token info 获取代币创建时间
-            if token_info:
-                # 尝试从 token_info 中获取创建时间
-                creation_time = None
-                # Birdeye API 可能返回的字段：created_timestamp, launch_time, first_trade_time 等
-                for field in ["created_timestamp", "launch_time", "first_trade_time", "createdAt", "created_at", "firstTradeUnixTime", "firstTradeTime"]:
-                    ts = token_info.get(field)
-                    if ts:
-                        try:
-                            # 判断是秒还是毫秒时间戳
-                            if ts > 1e11:
-                                ts = ts / 1000
-                            creation_time = datetime.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None)
-                            logger.info(f"⏰ Token creation time from Birdeye token info: {creation_time} (field: {field})")
-                            break
-                        except Exception as e:
-                            logger.debug(f"⚠️ Failed to parse {field}: {e}")
-                            continue
-                
-                if creation_time:
-                    metrics.first_trade_at = creation_time
+            # 使用 K 线的第一根时间作为开盘时间
+            if bars and len(bars) > 0:
+                try:
+                    first_bar = bars[0]
+                    first_bar_time = first_bar.get("t") or first_bar.get("time")
+                    if first_bar_time:
+                        # 判断是秒还是毫秒时间戳
+                        if first_bar_time > 1e11:
+                            first_bar_time = first_bar_time / 1000
+                        first_trade_dt = datetime.fromtimestamp(first_bar_time, tz=timezone.utc).replace(tzinfo=None)
+                        metrics.first_trade_at = first_trade_dt
+                        logger.info(f"⏰ First trade time from K-line: {first_trade_dt}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to extract first trade time from K-line: {e}")
             
             # 过滤检查
             filters_cfg = await state.filters_cfg(task_id=task_id_in_use)
@@ -326,30 +292,40 @@ async def main():
                 targets = task_cfg.get("push_chats", [])
             logger.info(f"📤 Pushing to {len(targets)} target(s): {targets}")
             if targets:
-                # 获取一个可用的 MTProto 客户端（用于发送到机器人）
-                mtproto_client = None
-                if client_pool.clients:
-                    # 使用第一个可用的客户端
-                    mtproto_client = list(client_pool.clients.values())[0]
-                
                 for chat_id in targets:
                     try:
                         # 判断是机器人（@username）还是群组/频道（数字ID）
                         is_bot = isinstance(chat_id, str) and chat_id.startswith("@")
                         
                         if is_bot:
-                            # 机器人：使用 MTProto 客户端，只发送纯 CA 文本，不带任何文件
-                            if not mtproto_client:
-                                logger.warning(f"⚠️  No MTProto client available, cannot send to bot {chat_id}")
-                                continue
-                            
+                            # 机器人：使用所有 MTProto 客户端，只发送纯 CA 文本，不带任何文件
                             payload = ca  # 对机器人仅发送 CA 地址
-                            await mtproto_client.send_message(
-                                chat_id, 
-                                payload,
-                                parse_mode="html"
-                            )
-                            logger.info(f"✅ Sent to bot {chat_id} via MTProto")
+                            sent_count = 0
+                            for cli_name, cli in client_pool.clients.items():
+                                if cli.is_connected():
+                                    try:
+                                        # 直接使用用户名发送，不先获取实体，避免 Telethon 版本兼容性问题
+                                        # Telethon 的 send_message 会自动解析用户名
+                                        await cli.send_message(
+                                            chat_id, 
+                                            payload
+                                        )
+                                        sent_count += 1
+                                        logger.info(f"✅ Sent to bot {chat_id} via MTProto client {cli_name}")
+                                    except Exception as e:
+                                        error_msg = str(e)
+                                        # 如果是 TLObject 解析错误，可能是 Telethon 版本问题
+                                        if "Constructor ID" in error_msg or "TLObject" in error_msg:
+                                            logger.warning(f"⚠️  Telethon version compatibility issue for client {cli_name} when sending to {chat_id}")
+                                            logger.debug(f"   Error: {error_msg[:200]}")
+                                            logger.info(f"   Try updating Telethon: pip install --upgrade telethon")
+                                        else:
+                                            logger.warning(f"⚠️  Failed to send to bot {chat_id} via MTProto client {cli_name}: {error_msg[:200]}")
+                                        logger.debug(f"   Full error:", exc_info=True)
+                            if sent_count == 0:
+                                logger.warning(f"⚠️  No connected MTProto client available or all failed, cannot send to bot {chat_id}")
+                            elif sent_count < len([c for c in client_pool.clients.values() if c.is_connected()]):
+                                logger.info(f"📊 Sent via {sent_count}/{len([c for c in client_pool.clients.values() if c.is_connected()])} connected client(s)")
                         else:
                             # 群组/频道：使用 Bot API
                             if photo_buffer:
@@ -379,78 +355,79 @@ async def main():
     # inject process_ca now that it is defined
     bot_app.process_ca = process_ca
     
-    # 使用第一个 MTProto 客户端作为群消息监听者（可监听到其他机器人的发言）
+    # 使用所有 MTProto 客户端作为群消息监听者（可监听到其他机器人的发言）
     if client_pool.clients:
-        mt_listener = list(client_pool.clients.values())[0]
+        def register_listener(mt_listener, client_name: str):
+            @mt_listener.on(events.NewMessage)
+            async def _mt_on_message(event, _client_name=client_name):
+                try:
+                    chat = await event.get_chat()
+                    chat_id = getattr(chat, "id", None)
+                    if chat_id is None:
+                        return
+                    text = event.raw_text or ""
+                    if not text:
+                        return
 
-        @mt_listener.on(events.NewMessage)
-        async def _mt_on_message(event):
-            try:
-                chat = await event.get_chat()
-                chat_id = getattr(chat, "id", None)
-                if chat_id is None:
-                    return
-                text = event.raw_text or ""
-                if not text:
-                    return
+                    logger.info(f"📨 [MTProto:{_client_name}] Incoming message in chat {chat_id}: {text[:80]!r}")
 
-                logger.info(f"📨 [MTProto] Incoming message in chat {chat_id}: {text[:80]!r}")
+                    # 根据任务配置中的 listen_chats 过滤需要处理的任务
+                    snap = await state.snapshot()
+                    tasks = snap.get("tasks", {})
+                    if not tasks:
+                        return
 
-                # 根据任务配置中的 listen_chats 过滤需要处理的任务
-                snap = await state.snapshot()
-                tasks = snap.get("tasks", {})
-                if not tasks:
-                    return
+                    username = getattr(chat, "username", None)
+                    name_keys = []
+                    if username:
+                        name_keys.append(f"@{username}")
 
-                username = getattr(chat, "username", None)
-                name_keys = []
-                if username:
-                    name_keys.append(f"@{username}")
+                    matched_tasks: List[str] = []
+                    for tid, cfg in tasks.items():
+                        if not cfg.get("enabled"):
+                            continue
+                        listens = cfg.get("listen_chats", [])
+                        # 统一成字符串 / 数字集合，并兼容 Bot API 的 -100 前缀形式
+                        listen_keys_str = set()
+                        listen_ids_int = set()
+                        for v in listens:
+                            listen_keys_str.add(str(v))
+                            if isinstance(v, int):
+                                listen_ids_int.add(v)
+                                # 如果是 Bot API 的 -100 前缀群组 ID，提取出 channel_id 形式
+                                s = str(v)
+                                if s.startswith("-100") and len(s) > 4 and s[4:].isdigit():
+                                    ch_id = int(s[4:])
+                                    listen_ids_int.add(ch_id)
+                                    listen_keys_str.add(str(ch_id))
 
-                matched_tasks: List[str] = []
-                for tid, cfg in tasks.items():
-                    if not cfg.get("enabled"):
-                        continue
-                    listens = cfg.get("listen_chats", [])
-                    # 统一成字符串 / 数字集合，并兼容 Bot API 的 -100 前缀形式
-                    listen_keys_str = set()
-                    listen_ids_int = set()
-                    for v in listens:
-                        listen_keys_str.add(str(v))
-                        if isinstance(v, int):
-                            listen_ids_int.add(v)
-                            # 如果是 Bot API 的 -100 前缀群组 ID，提取出 channel_id 形式
-                            s = str(v)
-                            if s.startswith("-100") and len(s) > 4 and s[4:].isdigit():
-                                ch_id = int(s[4:])
-                                listen_ids_int.add(ch_id)
-                                listen_keys_str.add(str(ch_id))
+                        chat_id_str = str(chat_id)
+                        # 直接数字匹配 / 字符串匹配 / @username 匹配
+                        if (
+                            chat_id in listen_ids_int
+                            or chat_id_str in listen_keys_str
+                            or any(k in listen_keys_str for k in name_keys)
+                        ):
+                            matched_tasks.append(tid)
 
-                    chat_id_str = str(chat_id)
-                    # 直接数字匹配 / 字符串匹配 / @username 匹配
-                    if (
-                        chat_id in listen_ids_int
-                        or chat_id_str in listen_keys_str
-                        or any(k in listen_keys_str for k in name_keys)
-                    ):
-                        matched_tasks.append(tid)
+                    if not matched_tasks:
+                        return
 
-                if not matched_tasks:
-                    return
+                    logger.info(f"📨 [MTProto:{_client_name}] Message received from chat {chat_id} for tasks: {matched_tasks}")
+                    found = set(CA_PATTERN.findall(text))
+                    if not found:
+                        return
+                    logger.info(f"🔍 [MTProto:{_client_name}] Found {len(found)} CA(s) in message: {[ca[:8] + '...' for ca in found]}")
 
-                logger.info(f"📨 [MTProto] Message received from chat {chat_id} for tasks: {matched_tasks}")
-                found = set(CA_PATTERN.findall(text))
-                if not found:
-                    return
-                logger.info(f"🔍 [MTProto] Found {len(found)} CA(s) in message: {[ca[:8] + '...' for ca in found]}")
+                    for ca in found:
+                        for tid in matched_tasks:
+                            asyncio.create_task(bot_app._process_ca_bg(chain_hint(ca), ca, task_id=tid))
+                except Exception as e:
+                    logger.error(f"❌ MTProto listener error ({_client_name}): {e}", exc_info=True)
 
-                for ca in found:
-                    for tid in matched_tasks:
-                        asyncio.create_task(bot_app._process_ca_bg(chain_hint(ca), ca, task_id=tid))
-            except Exception as e:
-                logger.error(f"❌ MTProto listener error: {e}", exc_info=True)
-
-        logger.info("📥 MTProto 客户端监听已启用（支持监听群内其他机器人消息）")
+        for cname, cli in client_pool.clients.items():
+            register_listener(cli, cname)
+        logger.info(f"📥 MTProto 客户端监听已启用（{len(client_pool.clients)} 个客户端，支持监听群内其他机器人消息）")
     else:
         logger.info("ℹ️ 未配置 MTProto 客户端，群消息监听仅依赖 Bot API（无法看到其他机器人消息）")
     
