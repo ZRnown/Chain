@@ -5,8 +5,9 @@ import html
 import logging
 import os
 import re
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Awaitable, Callable, List, Optional, Tuple
+from typing import Awaitable, Callable, List, Optional, Tuple, Dict, Any
 
 from telegram import Update, BotCommand, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -23,6 +24,9 @@ from telethon import events
 from .state import StateStore
 
 logger = logging.getLogger("ca_filter_bot.bot")
+
+# 中国时区（UTC+8）
+TZ_SHANGHAI = timezone(timedelta(hours=8))
 
 
 CA_PATTERN = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}|0x[a-fA-F0-9]{40}")
@@ -685,8 +689,20 @@ class BotApp:
             reply_markup=reply_markup
         )
     
-    async def show_filter_menu(self, message):
-        """显示筛选条件菜单"""
+    async def show_filter_menu(self, message, edit: bool = False):
+        """显示筛选条件菜单，显示已设置的值"""
+        snap = await self.state.snapshot()
+        current = snap.get("current_task")
+        if not current:
+            text = "⚠️ 请先创建并选择任务，然后再配置筛选条件。"
+            if edit:
+                await message.edit_message_text(text, parse_mode="HTML")
+            else:
+                await message.reply_text(text, parse_mode="HTML")
+            return
+        
+        filters_cfg = snap.get("tasks", {}).get(current, {}).get("filters", {})
+        
         filter_names = {
             "market_cap_usd": "💰 市值(USD)",
             "liquidity_usd": "💧 池子(USD)",
@@ -697,19 +713,39 @@ class BotApp:
             "trades_5m": "📈 5分钟交易数",
         }
         
+        # 构建菜单文本，显示已设置的值
+        text = f"🔍 <b>筛选条件设置</b>（当前任务：{html.escape(current)}）\n\n"
+        
         keyboard = []
         for key, name in filter_names.items():
-            keyboard.append([InlineKeyboardButton(name, callback_data=f"set_filter_{key}")])
+            f = filters_cfg.get(key, {})
+            min_v = f.get("min")
+            max_v = f.get("max")
+            
+            # 在按钮名称后显示已设置的值
+            if min_v is not None or max_v is not None:
+                min_str = f"{min_v:,.0f}" if min_v is not None else "无"
+                max_str = f"{max_v:,.0f}" if max_v is not None else "无"
+                # 对于百分比类型，使用更精确的格式
+                if key in ["top10_ratio", "max_holder_ratio"]:
+                    min_str = f"{min_v:.1f}" if min_v is not None else "无"
+                    max_str = f"{max_v:.1f}" if max_v is not None else "无"
+                button_text = f"{name} ({min_str}~{max_str})"
+            else:
+                button_text = f"{name} (未设置)"
+            
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"set_filter_{key}")])
         
         keyboard.append([InlineKeyboardButton("📋 查看所有筛选条件", callback_data="list_filters")])
         keyboard.append([InlineKeyboardButton("🔄 重置所有筛选", callback_data="reset_filters")])
+        keyboard.append([InlineKeyboardButton("🔙 返回", callback_data="back_task_menu")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await message.reply_text(
-            "🔍 **筛选条件设置**\n\n请选择要设置的筛选条件：",
-            parse_mode="Markdown",
-            reply_markup=reply_markup
-        )
+        
+        if edit:
+            await message.edit_message_text(text, parse_mode="HTML", reply_markup=reply_markup)
+        else:
+            await message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
 
     async def show_task_menu(self, message):
         """显示任务管理菜单"""
@@ -803,16 +839,46 @@ class BotApp:
                 "trades_5m": "5分钟交易数",
             }
             display_name = filter_names.get(filter_key, filter_key)
+            
+            # 获取当前已设置的值
+            snap = await self.state.snapshot()
+            current = snap.get("current_task")
+            filters_cfg = snap.get("tasks", {}).get(current, {}).get("filters", {}) if current else {}
+            f = filters_cfg.get(filter_key, {})
+            current_min = f.get("min")
+            current_max = f.get("max")
+            
+            # 显示当前值
+            current_text = ""
+            if current_min is not None or current_max is not None:
+                min_str = f"{current_min:,.0f}" if current_min is not None else "无限制"
+                max_str = f"{current_max:,.0f}" if current_max is not None else "无限制"
+                # 对于百分比类型，使用更精确的格式
+                if filter_key in ["top10_ratio", "max_holder_ratio"]:
+                    min_str = f"{current_min:.1f}" if current_min is not None else "无限制"
+                    max_str = f"{current_max:.1f}" if current_max is not None else "无限制"
+                current_text = f"\n\n当前设置：<b>{min_str} ~ {max_str}</b>"
+            
+            # 根据类型显示不同的提示
+            if filter_key == "max_holder_ratio":
+                hint = "例如：<code>0.1 0.2</code> 或 <code>null 0.15</code>（精确到0.1）"
+            elif filter_key in ["top10_ratio"]:
+                hint = "例如：<code>0.1 0.3</code> 或 <code>null 0.2</code>（百分比，0-1之间）"
+            else:
+                hint = "例如：<code>5000 1000000</code> 或 <code>null 0.15</code>"
+            
             await query.edit_message_text(
-                f"📝 设置筛选条件: <b>{display_name}</b>\n\n"
+                f"📝 设置筛选条件: <b>{display_name}</b>{current_text}\n\n"
                 f"请输入范围，格式：<code>最小值 最大值</code>\n"
-                f"例如：<code>5000 1000000</code> 或 <code>null 0.15</code>\n\n"
-                f"💡 使用 <code>null</code> 表示无限制",
+                f"{hint}\n\n"
+                f"💡 使用 <code>null</code> 表示无限制\n"
+                f"💡 设置完成后会自动返回菜单，可继续设置其他条件",
                 parse_mode="HTML"
             )
             if not hasattr(context, 'user_data'):
                 context.user_data = {}
             context.user_data[f'{user_id}_waiting'] = f'set_filter_{filter_key}'
+            context.user_data[f'{user_id}_filter_menu_query'] = query  # 保存query以便返回菜单
         elif data == "list_filters":
             await self.list_filters_callback(query)
         elif data == "reset_filters":
@@ -872,12 +938,39 @@ class BotApp:
             await self.list_tasks_callback(query)
         elif data.startswith("task_enable:"):
             task_id = data.split(":", 1)[1]
+            # 检查时间窗
+            task_cfg = await self.state.task_settings(task_id)
+            start_time = task_cfg.get("start_time")
+            end_time = task_cfg.get("end_time")
+            has_window = start_time or end_time
+            
+            if has_window:
+                # 检查是否在时间窗内
+                in_window = self._is_in_time_window(start_time, end_time)
+                if not in_window:
+                    window_str = f"{start_time or '不限制'} ~ {end_time or '不限制'}"
+                    await query.answer(f"⚠️ 当前不在时间窗内 ({window_str})", show_alert=True)
+                    await self.list_tasks_callback(query)
+                    return
+            
             await self.state.set_task_enabled(task_id, True)
+            # 同步到 scheduler
+            if self.scheduler:
+                for t in self.scheduler.tasks:
+                    if t.get("id") == task_id:
+                        t["enabled"] = True
+                self.scheduler.client_pool.update_tasks_config(self.scheduler.tasks)
             await query.answer("已启用")
             await self.list_tasks_callback(query)
         elif data.startswith("task_disable:"):
             task_id = data.split(":", 1)[1]
             await self.state.set_task_enabled(task_id, False)
+            # 同步到 scheduler
+            if self.scheduler:
+                for t in self.scheduler.tasks:
+                    if t.get("id") == task_id:
+                        t["enabled"] = False
+                self.scheduler.client_pool.update_tasks_config(self.scheduler.tasks)
             await query.answer("已暂停")
             await self.list_tasks_callback(query)
         elif data.startswith("task_delete:"):
@@ -956,9 +1049,32 @@ class BotApp:
                 if len(parts) != 2:
                     await update.message.reply_text("❌ 格式错误，请输入：<code>最小值 最大值</code>", parse_mode="HTML")
                     return
-                min_v = None if parts[0].lower() == "null" else float(parts[0])
-                max_v = None if parts[1].lower() == "null" else float(parts[1])
+                
+                # 解析最小值
+                try:
+                    min_v = None if parts[0].lower() in ("null", "none", "无", "空", "清空", "") else float(parts[0])
+                except ValueError:
+                    await update.message.reply_text(f"❌ 最小值格式错误：<code>{parts[0]}</code>", parse_mode="HTML")
+                    return
+                
+                # 解析最大值
+                try:
+                    max_v = None if parts[1].lower() in ("null", "none", "无", "空", "清空", "") else float(parts[1])
+                except ValueError:
+                    await update.message.reply_text(f"❌ 最大值格式错误：<code>{parts[1]}</code>", parse_mode="HTML")
+                    return
+                
+                # 对于最大持仓占比，验证精度（允许0.1的倍数）
+                if filter_key == "max_holder_ratio":
+                    if min_v is not None and abs(min_v * 10 - round(min_v * 10)) > 0.001:
+                        await update.message.reply_text("❌ 最大持仓占比需精确到0.1，例如：0.1, 0.2, 0.15", parse_mode="HTML")
+                        return
+                    if max_v is not None and abs(max_v * 10 - round(max_v * 10)) > 0.001:
+                        await update.message.reply_text("❌ 最大持仓占比需精确到0.1，例如：0.1, 0.2, 0.15", parse_mode="HTML")
+                        return
+                
                 await self.state.set_filter(filter_key, min_v, max_v)
+                
                 filter_names = {
                     "market_cap_usd": "市值(USD)", "liquidity_usd": "池子(USD)",
                     "open_minutes": "开盘时间(分钟)", "top10_ratio": "前十占比",
@@ -967,12 +1083,34 @@ class BotApp:
                 }
                 display_name = filter_names.get(filter_key, filter_key)
                 display_name_escaped = html.escape(str(display_name))
-                min_str = f"{min_v:,.0f}" if min_v is not None else "无限制"
-                max_str = f"{max_v:,.0f}" if max_v is not None else "无限制"
-                await update.message.reply_text(
-                    f"✅ 筛选条件已更新\n\n<b>{display_name_escaped}</b>\n最小值: {min_str}\n最大值: {max_str}",
-                    parse_mode="HTML"
-                )
+                
+                # 格式化显示值
+                if filter_key in ["top10_ratio", "max_holder_ratio"]:
+                    min_str = f"{min_v:.1f}" if min_v is not None else "无限制"
+                    max_str = f"{max_v:.1f}" if max_v is not None else "无限制"
+                else:
+                    min_str = f"{min_v:,.0f}" if min_v is not None else "无限制"
+                    max_str = f"{max_v:,.0f}" if max_v is not None else "无限制"
+                
+                # 清除等待状态
+                context.user_data[f'{user_id}_waiting'] = None
+                
+                # 如果有保存的菜单query，返回菜单页面
+                saved_query = context.user_data.get(f'{user_id}_filter_menu_query')
+                if saved_query:
+                    # 更新菜单显示
+                    await self.show_filter_menu(saved_query, edit=True)
+                    context.user_data[f'{user_id}_filter_menu_query'] = None
+                    await update.message.reply_text(
+                        f"✅ <b>{display_name_escaped}</b> 已更新：{min_str} ~ {max_str}\n\n"
+                        f"💡 已自动返回菜单，可继续设置其他条件",
+                        parse_mode="HTML"
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"✅ 筛选条件已更新\n\n<b>{display_name_escaped}</b>\n最小值: {min_str}\n最大值: {max_str}",
+                        parse_mode="HTML"
+                    )
             elif waiting == 'add_client':
                 # 检查是否输入"完成"
                 if text.strip().lower() in ('完成', 'done', 'finish'):
@@ -1314,15 +1452,32 @@ class BotApp:
                     scheduler_tasks[st.get("id")] = st
             
             for tid, cfg in tasks.items():
-                status = "✅ 启用" if cfg.get("enabled") else "⏸️ 暂停"
+                # 优先使用 scheduler 中的实际状态（如果存在）
+                actual_enabled = cfg.get("enabled")
+                if tid in scheduler_tasks:
+                    st = scheduler_tasks[tid]
+                    actual_enabled = st.get("enabled", actual_enabled)
+                    # 如果 scheduler 中的状态与 state 不一致，同步更新 state
+                    if actual_enabled != cfg.get("enabled"):
+                        await self.state.set_task_enabled(tid, actual_enabled)
+                
+                # 检查时间窗：如果设置了时间窗且不在时间窗内，强制显示为暂停
+                start_time = cfg.get("start_time")
+                end_time = cfg.get("end_time")
+                has_window = start_time or end_time
+                if has_window:
+                    in_window = self._is_in_time_window(start_time, end_time)
+                    if not in_window:
+                        # 不在时间窗内，强制显示为暂停
+                        actual_enabled = False
+                
+                status = "✅ 启用" if actual_enabled else "⏸️ 暂停"
                 tag = "（当前）" if tid == current else ""
                 listen_count = len(cfg.get("listen_chats", []))
                 push_count = len(cfg.get("push_chats", []))
                 # 获取定时信息
                 interval_minutes = None
                 next_run_time = None
-                start_time = cfg.get("start_time")
-                end_time = cfg.get("end_time")
                 if tid in scheduler_tasks:
                     st = scheduler_tasks[tid]
                     interval_minutes = st.get("interval_minutes")
@@ -1346,11 +1501,25 @@ class BotApp:
                     btn_row.append(InlineKeyboardButton("✅ 当前", callback_data="noop"))
                 else:
                     btn_row.append(InlineKeyboardButton(f"切换 {tid}", callback_data=f"task_select:{tid}"))
-                if cfg.get("enabled"):
-                    btn_row.append(InlineKeyboardButton("⏸️ 暂停", callback_data=f"task_disable:{tid}"))
+                # 检查时间窗，决定是否允许手动启用/禁用（使用上面已经获取的 start_time 和 end_time）
+                can_manual_toggle = True
+                if has_window:
+                    in_window = self._is_in_time_window(start_time, end_time)
+                    # 只有在时间窗内或没有设置时间窗时才能手动切换
+                    can_manual_toggle = in_window
+                
+                # 使用实际状态（优先 scheduler）
+                if actual_enabled:
+                    if can_manual_toggle:
+                        btn_row.append(InlineKeyboardButton("⏸️ 暂停", callback_data=f"task_disable:{tid}"))
+                    else:
+                        btn_row.append(InlineKeyboardButton("⏸️ 暂停", callback_data="noop"))
                 else:
-                    btn_row.append(InlineKeyboardButton("▶️ 启用", callback_data=f"task_enable:{tid}"))
-                btn_row.append(InlineKeyboardButton("⏰ 设置时间窗", callback_data=f"task_window:{tid}"))
+                    if can_manual_toggle:
+                        btn_row.append(InlineKeyboardButton("▶️ 启用", callback_data=f"task_enable:{tid}"))
+                    else:
+                        btn_row.append(InlineKeyboardButton("▶️ 启用", callback_data="noop"))
+                btn_row.append(InlineKeyboardButton("⏰ 时间窗", callback_data=f"task_window:{tid}"))
                 btn_row.append(InlineKeyboardButton("🗑️ 删除", callback_data=f"task_delete:{tid}"))
                 keyboard.append(btn_row)
                 lines.append("")
@@ -1458,6 +1627,40 @@ class BotApp:
         except Exception as e:
             logger.error(f"❌ Error processing CA {ca[:8]}...: {e}", exc_info=True)
     
+    def _is_in_time_window(self, start_time: Optional[str], end_time: Optional[str]) -> bool:
+        """检查当前时间是否在时间窗内（与 task_scheduler.py 中的逻辑一致）"""
+        if not start_time and not end_time:
+            return True  # 没有设置时间窗，始终允许
+        
+        now_dt = datetime.now(TZ_SHANGHAI)
+        now_minutes = now_dt.hour * 60 + now_dt.minute
+        start_minutes = None
+        end_minutes = None
+        
+        try:
+            if start_time:
+                h, m = start_time.split(":")
+                start_minutes = int(h) * 60 + int(m)
+            if end_time:
+                h, m = end_time.split(":")
+                end_minutes = int(h) * 60 + int(m)
+        except Exception:
+            logger.warning(f"⚠️ Invalid start/end time format: {start_time} - {end_time}")
+            return True  # 格式错误时允许运行，避免阻塞
+        
+        # 判断是否在时间窗内（支持跨天）
+        if start_minutes is not None and end_minutes is not None:
+            if start_minutes <= end_minutes:
+                return start_minutes <= now_minutes <= end_minutes
+            else:
+                return now_minutes >= start_minutes or now_minutes <= end_minutes
+        elif start_minutes is not None:
+            return now_minutes >= start_minutes
+        elif end_minutes is not None:
+            return now_minutes <= end_minutes
+        else:
+            return True
+
     def _format_filters(self, filters_cfg):
         """格式化筛选条件"""
         filter_names = {

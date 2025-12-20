@@ -28,12 +28,21 @@ def build_caption(m: TokenMetrics, filtered: Optional[List[str]] = None) -> str:
     def fmt_num(n): 
         return short_num(n) if n is not None else "N/A"
     
-    def fmt_pct(n): 
+    def fmt_pct(n, precision=2): 
+        """
+        格式化百分比
+        precision: 小数位数，默认2位。对于最大持仓占比，使用1位（精确到0.1）
+        """
         if n is None:
             return "N/A"
-        # 使用向下取整的方式保留两位小数，避免四舍五入
+        # 使用向下取整的方式保留指定小数位数，避免四舍五入
         try:
-            val = (Decimal(str(n)) * Decimal("100")).quantize(Decimal("0.00"), rounding=ROUND_DOWN)
+            val = Decimal(str(n)) * Decimal("100")
+            # 根据precision参数决定小数位数
+            if precision == 1:
+                val = val.quantize(Decimal("0.1"), rounding=ROUND_DOWN)
+            else:
+                val = val.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
             return f"{val}%"
         except Exception:
             return "N/A"
@@ -69,7 +78,7 @@ def build_caption(m: TokenMetrics, filtered: Optional[List[str]] = None) -> str:
     line2 = f"<code>{m.address}</code>"
     
     # 第三行：持有 | 前10 | 5分交易 | 最大持仓
-    line3 = f"👥持有: {fmt_int(m.holders)} | 🔟Top10: {fmt_pct(m.top10_ratio)} | 📉5m交易: {tx_5m} | 🐳最大: {fmt_pct(m.max_holder_ratio)}"
+    line3 = f"👥持有: {fmt_int(m.holders)} | 🔟Top10: {fmt_pct(m.top10_ratio)} | 📉5m交易: {tx_5m} | 🐳最大: {fmt_pct(m.max_holder_ratio, precision=1)}"
     
     # 底部：链接
     line4 = f"🔗 <a href='{gmgn_url}'>点击前往 GMGN 查看详情 ↗️</a>"
@@ -432,7 +441,7 @@ async def main():
         logger.info("ℹ️ 未配置 MTProto 客户端，群消息监听仅依赖 Bot API（无法看到其他机器人消息）")
     
     # 启动任务调度器（即便当前没有任务，也保持实例可用，避免 /add_client 等命令提示未启用）
-    scheduler = TaskScheduler(client_pool, process_ca)
+    scheduler = TaskScheduler(client_pool, process_ca, state_store=state)
     scheduler.load_tasks(client_pool.tasks_config())
     await scheduler.start()
     bot_app.scheduler = scheduler

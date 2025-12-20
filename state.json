@@ -52,7 +52,7 @@
       ],
       "filters": {
         "market_cap_usd": {
-          "min": null,
+          "min": 5000.0,
           "max": null
         },
         "liquidity_usd": {
@@ -79,7 +79,9 @@
           "min": null,
           "max": null
         }
-      }
+      },
+      "start_time": "16:00",
+      "end_time": "23:00"
     }
   }
 }
