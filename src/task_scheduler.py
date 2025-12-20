@@ -129,7 +129,7 @@ class TaskScheduler:
         while True:
             now = time.time()
             for task in self.tasks:
-                # 检查时间窗，自动启用/禁用任务
+                # 检查时间窗，自动启用/禁用任务（在检查 enabled 之前）
                 has_window = task.get("start_time") or task.get("end_time")
                 if has_window:
                     in_window = self._is_in_time_window(task)

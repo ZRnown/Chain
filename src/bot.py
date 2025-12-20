@@ -180,81 +180,118 @@ class BotApp:
             return
         snap = await self.state.snapshot()
         
-        current = snap.get("current_task")
         tasks = snap.get("tasks", {})
-        if not current:
-            await update.message.reply_text("⚠️ 请先创建并选择任务，再查看配置。", parse_mode="HTML")
+        current = snap.get("current_task")
+        if not tasks:
+            await update.message.reply_text("⚠️ 暂无任务配置。", parse_mode="HTML")
             return
-        task_cfg = tasks.get(current, {"listen_chats": [], "push_chats": [], "filters": {}})
         
-        text = f"⚙️ <b>当前配置</b>\n\n当前任务：<b>{html.escape(current)}</b>\n\n"
+        # 获取 scheduler 中的任务信息（用于显示定时时间）
+        scheduler_tasks = {}
+        if self.scheduler:
+            for st in self.scheduler.list_tasks():
+                scheduler_tasks[st.get("id")] = st
         
-        listen_chats = task_cfg.get("listen_chats", [])
-        text += f"👥 <b>监听群组</b> ({len(listen_chats)}个)\n"
-        if listen_chats:
-            for chat_id in listen_chats:
-                chat_info = await self._get_chat_info(chat_id)
-                chat_name = chat_info.get('title', f'群组 {chat_id}') if chat_info else f'群组 {chat_id}'
-                chat_name_escaped = html.escape(str(chat_name))
-                chat_id_escaped = html.escape(str(chat_id))
-                text += f"• <b>{chat_name_escaped}</b> (<code>{chat_id_escaped}</code>)\n"
-        else:
-            text += "• 暂无\n"
-        text += "\n"
+        text = f"⚙️ <b>所有任务配置</b> ({len(tasks)}个)\n\n"
         
-        push_chats = task_cfg.get("push_chats", [])
-        text += f"📤 <b>推送目标</b> ({len(push_chats)}个)\n"
-        if push_chats:
-            for chat_id in push_chats:
-                chat_info = await self._get_chat_info(chat_id)
-                if chat_info:
-                    chat_name = chat_info.get('title', f'目标 {chat_id}')
-                    chat_type = chat_info.get('type', 'unknown')
-                    username = chat_info.get('username')
-                    chat_id_display = chat_info.get('id', chat_id)
-                    
-                    type_info = {
-                        'group': ('👥', '群组'),
-                        'supergroup': ('👥', '群组'),
-                        'channel': ('📢', '频道'),
-                        'private': ('👤', '个人'),
-                        'bot': ('🤖', '机器人')
-                    }.get(chat_type, ('📌', '目标'))
-                    
-                    type_icon, type_name = type_info
+        # 遍历所有任务
+        for tid, task_cfg in tasks.items():
+            is_current = (tid == current)
+            current_tag = "（当前）" if is_current else ""
+            text += f"━━━━━━━━━━━━━━━━━━━━\n"
+            text += f"📋 <b>{html.escape(tid)}</b> {current_tag}\n\n"
+            
+            # 显示定时信息
+            start_time = task_cfg.get("start_time")
+            end_time = task_cfg.get("end_time")
+            interval_minutes = None
+            if tid in scheduler_tasks:
+                st = scheduler_tasks[tid]
+                interval_minutes = st.get("interval_minutes")
+            
+            if interval_minutes:
+                text += f"⏰ <b>定时任务</b>: 每 {interval_minutes} 分钟\n"
+            if start_time or end_time:
+                text += f"🕐 <b>时间窗</b>: {start_time or '--:--'} ~ {end_time or '--:--'}\n"
+            if interval_minutes or start_time or end_time:
+                text += "\n"
+            
+            listen_chats = task_cfg.get("listen_chats", [])
+            text += f"👥 <b>监听群组</b> ({len(listen_chats)}个)\n"
+            if listen_chats:
+                for chat_id in listen_chats[:5]:  # 最多显示5个
+                    chat_info = await self._get_chat_info(chat_id)
+                    chat_name = chat_info.get('title', f'群组 {chat_id}') if chat_info else f'群组 {chat_id}'
                     chat_name_escaped = html.escape(str(chat_name))
-                    chat_id_escaped = html.escape(str(chat_id_display))
-                    username_str = f" @{html.escape(str(username))}" if username else ""
-                    text += f"• {type_icon} <b>{chat_name_escaped}</b> ({type_name}) <code>{chat_id_escaped}</code>{username_str}\n"
-                else:
                     chat_id_escaped = html.escape(str(chat_id))
-                    text += f"• 📌 <b>目标</b> (<code>{chat_id_escaped}</code>)\n"
-        else:
-            text += "• 暂无\n"
-        text += "\n"
-        
-        text += "🔍 <b>筛选条件</b>\n"
-        filters_cfg = task_cfg.get("filters", {})
-        filter_names = {
-            "market_cap_usd": "市值(USD)",
-            "liquidity_usd": "池子(USD)",
-            "open_minutes": "开盘时间(分钟)",
-            "top10_ratio": "前十占比",
-            "holder_count": "持有人数",
-            "max_holder_ratio": "最大持仓占比",
-            "trades_5m": "5分钟交易数",
-        }
-        for key, display_name in filter_names.items():
-            f = filters_cfg.get(key, {})
-            min_v = f.get("min")
-            max_v = f.get("max")
-            if min_v is None and max_v is None:
-                text += f"• {display_name}: 未设置\n"
+                    text += f"• <b>{chat_name_escaped}</b> (<code>{chat_id_escaped}</code>)\n"
+                if len(listen_chats) > 5:
+                    text += f"• ... 还有 {len(listen_chats) - 5} 个\n"
             else:
-                min_str = f"{min_v:,.0f}" if min_v is not None else "无限制"
-                max_str = f"{max_v:,.0f}" if max_v is not None else "无限制"
-                text += f"• {display_name}: {min_str} ~ {max_str}\n"
-        text += "\n"
+                text += "• 暂无\n"
+            text += "\n"
+            
+            push_chats = task_cfg.get("push_chats", [])
+            text += f"📤 <b>推送目标</b> ({len(push_chats)}个)\n"
+            if push_chats:
+                for chat_id in push_chats[:5]:  # 最多显示5个
+                    chat_info = await self._get_chat_info(chat_id)
+                    if chat_info:
+                        chat_name = chat_info.get('title', f'目标 {chat_id}')
+                        chat_type = chat_info.get('type', 'unknown')
+                        username = chat_info.get('username')
+                        chat_id_display = chat_info.get('id', chat_id)
+                        
+                        type_info = {
+                            'group': ('👥', '群组'),
+                            'supergroup': ('👥', '群组'),
+                            'channel': ('📢', '频道'),
+                            'private': ('👤', '个人'),
+                            'bot': ('🤖', '机器人')
+                        }.get(chat_type, ('📌', '目标'))
+                        
+                        type_icon, type_name = type_info
+                        chat_name_escaped = html.escape(str(chat_name))
+                        chat_id_escaped = html.escape(str(chat_id_display))
+                        username_str = f" @{html.escape(str(username))}" if username else ""
+                        text += f"• {type_icon} <b>{chat_name_escaped}</b> ({type_name}) <code>{chat_id_escaped}</code>{username_str}\n"
+                    else:
+                        chat_id_escaped = html.escape(str(chat_id))
+                        text += f"• 📌 <b>目标</b> (<code>{chat_id_escaped}</code>)\n"
+                if len(push_chats) > 5:
+                    text += f"• ... 还有 {len(push_chats) - 5} 个\n"
+            else:
+                text += "• 暂无\n"
+            text += "\n"
+            
+            text += "🔍 <b>筛选条件</b>\n"
+            filters_cfg = task_cfg.get("filters", {})
+            filter_names = {
+                "market_cap_usd": "市值(USD)",
+                "liquidity_usd": "池子(USD)",
+                "open_minutes": "开盘时间(分钟)",
+                "top10_ratio": "前十占比",
+                "holder_count": "持有人数",
+                "max_holder_ratio": "最大持仓占比",
+                "trades_5m": "5分钟交易数",
+            }
+            has_filter = False
+            for key, display_name in filter_names.items():
+                f = filters_cfg.get(key, {})
+                min_v = f.get("min")
+                max_v = f.get("max")
+                if min_v is not None or max_v is not None:
+                    has_filter = True
+                    min_str = f"{min_v:,.0f}" if min_v is not None else "无限制"
+                    max_str = f"{max_v:,.0f}" if max_v is not None else "无限制"
+                    # 对于百分比类型，使用更精确的格式
+                    if key in ["top10_ratio", "max_holder_ratio"]:
+                        min_str = f"{min_v*100:.1f}%" if min_v is not None else "无限制"
+                        max_str = f"{max_v*100:.1f}%" if max_v is not None else "无限制"
+                    text += f"• {display_name}: {min_str} ~ {max_str}\n"
+            if not has_filter:
+                text += "• 未设置\n"
+            text += "\n"
         
         await update.message.reply_text(text, parse_mode="HTML")
 
