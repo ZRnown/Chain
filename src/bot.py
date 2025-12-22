@@ -4,6 +4,7 @@ import asyncio
 import html
 import logging
 import os
+import time
 import re
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -600,8 +601,13 @@ class BotApp:
                 text += f"• **{display_name}** (`{key}`): ❌ 未设置\n"
             else:
                 has_set = True
-                min_str = f"{min_v:,.2f}" if min_v is not None else "无限制"
-                max_str = f"{max_v:,.2f}" if max_v is not None else "无限制"
+                # 对于百分比类型，显示为百分号
+                if key in ["top10_ratio", "max_holder_ratio"]:
+                    min_str = f"{min_v*100:.1f}%" if min_v is not None else "无限制"
+                    max_str = f"{max_v*100:.1f}%" if max_v is not None else "无限制"
+                else:
+                    min_str = f"{min_v:,.2f}" if min_v is not None else "无限制"
+                    max_str = f"{max_v:,.2f}" if max_v is not None else "无限制"
                 text += f"• **{display_name}** (`{key}`): ✅ {min_str} ~ {max_str}\n"
         
         if not has_set:
@@ -761,12 +767,13 @@ class BotApp:
             
             # 在按钮名称后显示已设置的值
             if min_v is not None or max_v is not None:
-                min_str = f"{min_v:,.0f}" if min_v is not None else "无"
-                max_str = f"{max_v:,.0f}" if max_v is not None else "无"
-                # 对于百分比类型，使用更精确的格式
+                # 对于百分比类型，显示为百分号（0.23 -> 23.0%）
                 if key in ["top10_ratio", "max_holder_ratio"]:
-                    min_str = f"{min_v:.1f}" if min_v is not None else "无"
-                    max_str = f"{max_v:.1f}" if max_v is not None else "无"
+                    min_str = f"{min_v*100:.1f}%" if min_v is not None else "无"
+                    max_str = f"{max_v*100:.1f}%" if max_v is not None else "无"
+                else:
+                    min_str = f"{min_v:,.0f}" if min_v is not None else "无"
+                    max_str = f"{max_v:,.0f}" if max_v is not None else "无"
                 button_text = f"{name} ({min_str}~{max_str})"
             else:
                 button_text = f"{name} (未设置)"
@@ -1125,8 +1132,8 @@ class BotApp:
                 
                 # 格式化显示值
                 if filter_key in ["top10_ratio", "max_holder_ratio"]:
-                    min_str = f"{min_v:.1f}" if min_v is not None else "无限制"
-                    max_str = f"{max_v:.1f}" if max_v is not None else "无限制"
+                    min_str = f"{min_v*100:.1f}%" if min_v is not None else "无限制"
+                    max_str = f"{max_v*100:.1f}%" if max_v is not None else "无限制"
                 else:
                     min_str = f"{min_v:,.0f}" if min_v is not None else "无限制"
                     max_str = f"{max_v:,.0f}" if max_v is not None else "无限制"
@@ -1289,6 +1296,31 @@ class BotApp:
                         if t.get("id") == task_id:
                             t["start_time"] = start_v
                             t["end_time"] = end_v
+                            # 立即根据新的时间窗更新任务的启用状态与 next_run，保证自动启停生效
+                            try:
+                                in_window = self._is_in_time_window(start_v, end_v)
+                            except Exception:
+                                in_window = True
+                            if in_window:
+                                t["enabled"] = True
+                                t["next_run"] = time.time()
+                            else:
+                                t["enabled"] = False
+                                # 将 next_run 设置为下一个时间窗开始时刻（中国时区）
+                                try:
+                                    if start_v:
+                                        h, m = start_v.split(":")
+                                        sh = int(h); sm = int(m)
+                                        from datetime import datetime as _dt, timedelta as _td
+                                        now_dt = _dt.now(TZ_SHANGHAI)
+                                        candidate = now_dt.replace(hour=sh, minute=sm, second=0, microsecond=0)
+                                        if candidate <= now_dt:
+                                            candidate = candidate + _td(days=1)
+                                        t["next_run"] = candidate.timestamp()
+                                    else:
+                                        t["next_run"] = time.time()
+                                except Exception:
+                                    t["next_run"] = time.time()
                     self.scheduler.client_pool.update_tasks_config(self.scheduler.tasks)
                 start_str = start_v or "不限制"
                 end_str = end_v or "不限制"
@@ -1743,8 +1775,12 @@ class BotApp:
             if min_v is None and max_v is None:
                 text += f"• {display_name}: 未设置\n"
             else:
-                min_str = f"{min_v:,.0f}" if min_v is not None else "无限制"
-                max_str = f"{max_v:,.0f}" if max_v is not None else "无限制"
+                if key in ["top10_ratio", "max_holder_ratio"]:
+                    min_str = f"{min_v*100:.1f}%" if min_v is not None else "无限制"
+                    max_str = f"{max_v*100:.1f}%" if max_v is not None else "无限制"
+                else:
+                    min_str = f"{min_v:,.0f}" if min_v is not None else "无限制"
+                    max_str = f"{max_v:,.0f}" if max_v is not None else "无限制"
                 text += f"• {display_name}: {min_str} ~ {max_str}\n"
         return text
 
