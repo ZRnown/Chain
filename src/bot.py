@@ -1028,6 +1028,8 @@ class BotApp:
             if not hasattr(context, 'user_data'):
                 context.user_data = {}
             context.user_data[f'{user_id}_waiting'] = f'set_window:{task_id}'
+            # 保存原始 callback query（用于输入完成或出错后返回任务列表并刷新）
+            context.user_data[f'{user_id}_window_menu_query'] = query
         elif data == "back_task_menu":
             # 返回到任务管理菜单
             keyboard = [
@@ -1247,33 +1249,57 @@ class BotApp:
                 parts = text.strip().split()
                 if len(parts) != 2:
                     await update.message.reply_text("❌ 请输入两个值：<code>HH:MM HH:MM</code>，或用 <code>none</code> 代表不限制。", parse_mode="HTML")
-                else:
-                    start_raw, end_raw = parts
-                    def norm(val):
-                        # 支持多种清空方式：none, None, null, Null, 无, 空, 清空
-                        val_lower = val.lower().strip()
-                        if val_lower in ("none", "null", "无", "空", "清空", ""):
-                            return None
-                        if len(val) == 5 and val[2] == ":" and val[:2].isdigit() and val[3:].isdigit():
-                            h = int(val[:2]); m = int(val[3:])
-                            if 0 <= h < 24 and 0 <= m < 60:
-                                return f"{h:02d}:{m:02d}"
-                        return "invalid"
-                    start_v = norm(start_raw)
-                    end_v = norm(end_raw)
-                    if start_v == "invalid" or end_v == "invalid":
-                        await update.message.reply_text("❌ 时间格式错误，请输入 <code>HH:MM HH:MM</code>，或用 <code>none</code> 代表不限制。", parse_mode="HTML")
+                    # 返回任务列表界面，清理等待状态
+                    saved_query = context.user_data.get(f'{user_id}_window_menu_query')
+                    if saved_query:
+                        await self.list_tasks_callback(saved_query)
                     else:
-                        await self.state.set_task_window(task_id, start_v, end_v)
-                        if self.scheduler:
-                            for t in self.scheduler.tasks:
-                                if t.get("id") == task_id:
-                                    t["start_time"] = start_v
-                                    t["end_time"] = end_v
-                            self.scheduler.client_pool.update_tasks_config(self.scheduler.tasks)
-                        start_str = start_v or "不限制"
-                        end_str = end_v or "不限制"
-                        await update.message.reply_text(f"✅ 已更新任务时间窗：{start_str} ~ {end_str}", parse_mode="HTML")
+                        await self.show_task_menu(update.message)
+                    context.user_data[f'{user_id}_waiting'] = None
+                    context.user_data[f'{user_id}_window_menu_query'] = None
+                    return
+                start_raw, end_raw = parts
+                def norm(val):
+                    # 支持多种清空方式：none, None, null, Null, 无, 空, 清空
+                    val_lower = val.lower().strip()
+                    if val_lower in ("none", "null", "无", "空", "清空", ""):
+                        return None
+                    if len(val) == 5 and val[2] == ":" and val[:2].isdigit() and val[3:].isdigit():
+                        h = int(val[:2]); m = int(val[3:])
+                        if 0 <= h < 24 and 0 <= m < 60:
+                            return f"{h:02d}:{m:02d}"
+                    return "invalid"
+                start_v = norm(start_raw)
+                end_v = norm(end_raw)
+                if start_v == "invalid" or end_v == "invalid":
+                    await update.message.reply_text("❌ 时间格式错误，请输入 <code>HH:MM HH:MM</code>，或用 <code>none</code> 代表不限制。", parse_mode="HTML")
+                    # 输入错误，返回任务列表界面
+                    saved_query = context.user_data.get(f'{user_id}_window_menu_query')
+                    if saved_query:
+                        await self.list_tasks_callback(saved_query)
+                    else:
+                        await self.show_task_menu(update.message)
+                    context.user_data[f'{user_id}_waiting'] = None
+                    context.user_data[f'{user_id}_window_menu_query'] = None
+                    return
+                # 成功解析，保存时间窗并刷新任务列表
+                await self.state.set_task_window(task_id, start_v, end_v)
+                if self.scheduler:
+                    for t in self.scheduler.tasks:
+                        if t.get("id") == task_id:
+                            t["start_time"] = start_v
+                            t["end_time"] = end_v
+                    self.scheduler.client_pool.update_tasks_config(self.scheduler.tasks)
+                start_str = start_v or "不限制"
+                end_str = end_v or "不限制"
+                await update.message.reply_text(f"✅ 已更新任务时间窗：{start_str} ~ {end_str}", parse_mode="HTML")
+                saved_query = context.user_data.get(f'{user_id}_window_menu_query')
+                if saved_query:
+                    await self.list_tasks_callback(saved_query)
+                else:
+                    await self.show_task_menu(update.message)
+                context.user_data[f'{user_id}_waiting'] = None
+                context.user_data[f'{user_id}_window_menu_query'] = None
             # 清除等待状态
             context.user_data[f'{user_id}_waiting'] = None
         except ValueError:
