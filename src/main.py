@@ -83,7 +83,7 @@ def build_caption(m: TokenMetrics, filtered: Optional[List[str]] = None) -> str:
     # 底部：链接
     line4 = f"🔗 <a href='{gmgn_url}'>点击前往 GMGN 查看详情 ↗️</a>"
     
-    content = [title_line, line1, line2, line3, "-"*20, line4]
+    content = [title_line, line1, line2, line3, line4]
     
     if filtered:
         content.append(f"\n🚫 <b>已过滤原因:</b> {', '.join(filtered)}")

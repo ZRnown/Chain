@@ -128,8 +128,21 @@ class TaskScheduler:
     async def _run_loop(self):
         while True:
             now = time.time()
+            # Current wall clock in China timezone for logging/decisions
+            now_dt_for_log = datetime.now(TZ_SHANGHAI)
             for task in self.tasks:
                 # 检查时间窗，自动启用/禁用任务（在检查 enabled 之前）
+                try:
+                    logger.debug(
+                        "Checking time window for task %s: start=%s end=%s now=%s",
+                        task.get("id"),
+                        task.get("start_time"),
+                        task.get("end_time"),
+                        now_dt_for_log.strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+                except Exception:
+                    # 保证日志调用不抛异常
+                    pass
                 has_window = task.get("start_time") or task.get("end_time")
                 if has_window:
                     in_window = self._is_in_time_window(task)
@@ -222,18 +235,38 @@ class TaskScheduler:
         now_minutes = now_dt.hour * 60 + now_dt.minute
         start_minutes = None
         end_minutes = None
-        
+
         try:
             if task.get("start_time"):
-                h, m = task["start_time"].split(":")
+                st = str(task.get("start_time")).strip()
+                h, m = st.split(":")
                 start_minutes = int(h) * 60 + int(m)
             if task.get("end_time"):
-                h, m = task["end_time"].split(":")
+                en = str(task.get("end_time")).strip()
+                h, m = en.split(":")
                 end_minutes = int(h) * 60 + int(m)
         except Exception:
-            logger.warning(f"⚠️ Invalid start/end time format for task {task['id']}: {task.get('start_time')} - {task.get('end_time')}")
-            return True  # 格式错误时允许运行，避免阻塞
-        
+            logger.warning(
+                "⚠️ Invalid start/end time format for task %s: %s - %s",
+                task.get("id"),
+                task.get("start_time"),
+                task.get("end_time"),
+            )
+            # 避免因格式问题阻塞任务，返回 True 允许执行
+            return True
+
+        # 记录调试信息，便于排查自动启停问题
+        logger.debug(
+            "Time window check task=%s now=%02d:%02d start=%s(%s) end=%s(%s)",
+            task.get("id"),
+            now_dt.hour,
+            now_dt.minute,
+            task.get("start_time"),
+            f"{start_minutes}" if start_minutes is not None else "None",
+            task.get("end_time"),
+            f"{end_minutes}" if end_minutes is not None else "None",
+        )
+
         # 判断是否在时间窗内（支持跨天）
         if start_minutes is not None and end_minutes is not None:
             if start_minutes <= end_minutes:
