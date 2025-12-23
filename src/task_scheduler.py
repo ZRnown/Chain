@@ -30,6 +30,8 @@ class TaskScheduler:
         self.state_store = state_store  # 用于同步状态到 state.json
         self.tasks: List[Dict[str, Any]] = []
         self._loop_task: Optional[asyncio.Task] = None
+        self._state_watcher_task: Optional[asyncio.Task] = None
+        self._state_mtime: Optional[float] = None
 
     def load_tasks(self, tasks_cfg: List[dict]) -> None:
         now = time.time()
@@ -70,6 +72,13 @@ class TaskScheduler:
             return
         self._loop_task = asyncio.create_task(self._run_loop(), name="task_scheduler_loop")
         logger.info("✅ Task scheduler started")
+        # 如果提供了 state_store，启动一个后台任务监听 state.json 的变化并同步到 scheduler
+        if self.state_store and not self._state_watcher_task:
+            try:
+                self._state_watcher_task = asyncio.create_task(self._run_state_watcher(), name="task_scheduler_state_watcher")
+                logger.info("🔔 State watcher started for state.json changes")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to start state watcher: {e}")
 
     async def stop(self):
         if self._loop_task:
@@ -79,6 +88,13 @@ class TaskScheduler:
             except asyncio.CancelledError:
                 pass
             logger.info("✅ Task scheduler stopped")
+        if self._state_watcher_task:
+            self._state_watcher_task.cancel()
+            try:
+                await self._state_watcher_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("✅ State watcher stopped")
 
     def list_tasks(self) -> List[Dict[str, Any]]:
         return self.tasks
@@ -225,6 +241,92 @@ class TaskScheduler:
                     logger.info(f"⏰ Task {task['id']} next run: {next_run_dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
                     asyncio.create_task(self._run_task(task))
             await asyncio.sleep(3)
+    
+    async def _run_state_watcher(self):
+        """后台轮询 state.json 文件的修改时间，若变化则同步到 scheduler 内存"""
+        if not self.state_store:
+            return
+        path = self.state_store.path
+        try:
+            if path.exists():
+                self._state_mtime = path.stat().st_mtime
+        except Exception:
+            self._state_mtime = None
+
+        while True:
+            try:
+                await asyncio.sleep(3)
+                try:
+                    if not path.exists():
+                        continue
+                    mtime = path.stat().st_mtime
+                except Exception:
+                    continue
+                if self._state_mtime is None or mtime != self._state_mtime:
+                    self._state_mtime = mtime
+                    logger.info(f"🔄 Detected state.json change, syncing tasks to scheduler...")
+                    try:
+                        await self._sync_tasks_from_state()
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to sync tasks from state: {e}")
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                # 忽略单轮错误，继续循环
+                continue
+
+    async def _sync_tasks_from_state(self):
+        """从 StateStore 读取任务配置并同步到 scheduler.tasks（仅更新存在的任务）"""
+        if not self.state_store:
+            return
+        tasks_cfg = await self.state_store.all_tasks()
+        if not tasks_cfg:
+            return
+
+        # tasks_cfg 是 dict {task_id: {enabled, listen_chats, push_chats, filters, start_time, end_time}}
+        # 更新 self.tasks 中已存在的任务
+        updated = 0
+        for t in self.tasks:
+            tid = t.get("id")
+            if tid and tid in tasks_cfg:
+                cfg = tasks_cfg[tid]
+                t["start_time"] = cfg.get("start_time")
+                t["end_time"] = cfg.get("end_time")
+                # 同步 enabled 字段（管理员手动设置）
+                t["enabled"] = bool(cfg.get("enabled", t.get("enabled", True)))
+
+                # 重新计算 next_run/启用状态根据时间窗
+                try:
+                    in_window = self._is_in_time_window(t)
+                except Exception:
+                    in_window = True
+                if in_window and t.get("enabled", False):
+                    t["next_run"] = time.time()
+                else:
+                    # 如果不在时间窗内，设置 next_run 为时间窗开始
+                    try:
+                        st = t.get("start_time")
+                        if st:
+                            h, m = st.split(":")
+                            from datetime import datetime as _dt, timedelta as _td
+                            now_dt = _dt.now(TZ_SHANGHAI)
+                            candidate = now_dt.replace(hour=int(h), minute=int(m), second=0, microsecond=0)
+                            if candidate <= now_dt:
+                                candidate = candidate + _td(days=1)
+                            t["next_run"] = candidate.timestamp()
+                        else:
+                            t["next_run"] = time.time()
+                    except Exception:
+                        t["next_run"] = time.time()
+                updated += 1
+
+        if updated > 0:
+            logger.info(f"✅ Synchronized {updated} task(s) from state.json")
+            # 写回 client pool config
+            try:
+                self.client_pool.update_tasks_config(self.tasks)
+            except Exception:
+                pass
     
     def _is_in_time_window(self, task: Dict[str, Any]) -> bool:
         """检查任务是否在时间窗内"""

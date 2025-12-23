@@ -546,8 +546,27 @@ class BotApp:
             )
             return
         name, min_s, max_s = context.args
-        min_v = None if min_s.lower() == "null" else _maybe_float(min_s)
-        max_v = None if max_s.lower() == "null" else _maybe_float(max_s)
+        # 对于百分比类型（前十占比/最大持仓），输入用 1-100 的整数，内部以 0-1 存储
+        if name in ("top10_ratio", "max_holder_ratio"):
+            def parse_pct(s: str):
+                if s.lower() == "null":
+                    return None
+                try:
+                    iv = int(s)
+                except Exception:
+                    raise ValueError("percent must be integer 1-100")
+                if iv < 0 or iv > 100:
+                    raise ValueError("percent must be between 0 and 100")
+                return iv / 100.0
+            try:
+                min_v = parse_pct(min_s)
+                max_v = parse_pct(max_s)
+            except Exception as e:
+                await update.message.reply_text(f"❌ 设置失败: {e}")
+                return
+        else:
+            min_v = None if min_s.lower() == "null" else _maybe_float(min_s)
+            max_v = None if max_s.lower() == "null" else _maybe_float(max_s)
         try:
             await self.state.set_filter(name, min_v, max_v)
         except Exception as e:
@@ -903,13 +922,13 @@ class BotApp:
                     max_str = f"{current_max:.1f}" if current_max is not None else "无限制"
                 current_text = f"\n\n当前设置：<b>{min_str} ~ {max_str}</b>"
             
-            # 根据类型显示不同的提示
+            # 根据类型显示不同的提示（百分比类使用 1-100 的整数）
             if filter_key == "max_holder_ratio":
-                hint = "例如：<code>0.1 0.2</code> 或 <code>null 0.15</code>（精确到0.1）"
+                hint = "例如：<code>1 20</code> 或 <code>null 15</code>（输入 1-100 的整数，代表百分比）"
             elif filter_key in ["top10_ratio"]:
-                hint = "例如：<code>0.1 0.3</code> 或 <code>null 0.2</code>（百分比，0-1之间）"
+                hint = "例如：<code>1 30</code> 或 <code>null 20</code>（输入 1-100 的整数，代表百分比）"
             else:
-                hint = "例如：<code>5000 1000000</code> 或 <code>null 0.15</code>"
+                hint = "例如：<code>5000 1000000</code> 或 <code>null 15</code>"
             
             await query.edit_message_text(
                 f"📝 设置筛选条件: <b>{display_name}</b>{current_text}\n\n"
@@ -1096,27 +1115,36 @@ class BotApp:
                     await update.message.reply_text("❌ 格式错误，请输入：<code>最小值 最大值</code>", parse_mode="HTML")
                     return
                 
-                # 解析最小值
-                try:
-                    min_v = None if parts[0].lower() in ("null", "none", "无", "空", "清空", "") else float(parts[0])
-                except ValueError:
-                    await update.message.reply_text(f"❌ 最小值格式错误：<code>{parts[0]}</code>", parse_mode="HTML")
-                    return
-                
-                # 解析最大值
-                try:
-                    max_v = None if parts[1].lower() in ("null", "none", "无", "空", "清空", "") else float(parts[1])
-                except ValueError:
-                    await update.message.reply_text(f"❌ 最大值格式错误：<code>{parts[1]}</code>", parse_mode="HTML")
-                    return
-                
-                # 对于最大持仓占比，验证精度（允许0.1的倍数）
-                if filter_key == "max_holder_ratio":
-                    if min_v is not None and abs(min_v * 10 - round(min_v * 10)) > 0.001:
-                        await update.message.reply_text("❌ 最大持仓占比需精确到0.1，例如：0.1, 0.2, 0.15", parse_mode="HTML")
+                # 解析最小/最大值
+                # 对于百分比类型（前十占比 / 最大持仓），要求输入 1-100 的整数，内部以 0-1 存储
+                if filter_key in ("top10_ratio", "max_holder_ratio"):
+                    def parse_pct_str(s: str):
+                        if s.lower() in ("null", "none", "无", "空", "清空", ""):
+                            return None
+                        try:
+                            iv = int(s)
+                        except Exception:
+                            raise ValueError(f"百分比需为整数，范围 0-100：{s}")
+                        if iv < 0 or iv > 100:
+                            raise ValueError(f"百分比需在 0-100 之间：{s}")
+                        return iv / 100.0
+                    try:
+                        min_v = parse_pct_str(parts[0])
+                        max_v = parse_pct_str(parts[1])
+                    except ValueError as e:
+                        await update.message.reply_text(f"❌ 格式错误: {e}", parse_mode="HTML")
                         return
-                    if max_v is not None and abs(max_v * 10 - round(max_v * 10)) > 0.001:
-                        await update.message.reply_text("❌ 最大持仓占比需精确到0.1，例如：0.1, 0.2, 0.15", parse_mode="HTML")
+                else:
+                    # 普通数值解析
+                    try:
+                        min_v = None if parts[0].lower() in ("null", "none", "无", "空", "清空", "") else float(parts[0])
+                    except ValueError:
+                        await update.message.reply_text(f"❌ 最小值格式错误：<code>{parts[0]}</code>", parse_mode="HTML")
+                        return
+                    try:
+                        max_v = None if parts[1].lower() in ("null", "none", "无", "空", "清空", "") else float(parts[1])
+                    except ValueError:
+                        await update.message.reply_text(f"❌ 最大值格式错误：<code>{parts[1]}</code>", parse_mode="HTML")
                         return
                 
                 await self.state.set_filter(filter_key, min_v, max_v)
