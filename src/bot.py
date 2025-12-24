@@ -549,15 +549,19 @@ class BotApp:
         # 对于百分比类型（前十占比/最大持仓），输入用 1-100 的整数，内部以 0-1 存储
         if name in ("top10_ratio", "max_holder_ratio"):
             def parse_pct(s: str):
+                """允许 0-100，可带一位小数（如 2.5 -> 2.5%）"""
                 if s.lower() == "null":
                     return None
                 try:
-                    iv = int(s)
+                    fv = float(s)
                 except Exception:
-                    raise ValueError("percent must be integer 1-100")
-                if iv < 0 or iv > 100:
+                    raise ValueError("percent must be number 0-100 (one decimal allowed)")
+                # 允许到一位小数
+                if abs(fv * 10 - round(fv * 10)) > 0.0001:
+                    raise ValueError("percent precision up to 0.1 (e.g. 2.5)")
+                if fv < 0 or fv > 100:
                     raise ValueError("percent must be between 0 and 100")
-                return iv / 100.0
+                return fv / 100.0
             try:
                 min_v = parse_pct(min_s)
                 max_v = parse_pct(max_s)
@@ -583,8 +587,13 @@ class BotApp:
             "trades_5m": "5分钟交易数",
         }
         display_name = filter_names.get(name, name)
-        min_str = f"{min_v:,.0f}" if min_v is not None else "无限制"
-        max_str = f"{max_v:,.0f}" if max_v is not None else "无限制"
+        # 格式化显示：百分比类型显示为百分号并保留一位小数
+        if name in ("top10_ratio", "max_holder_ratio"):
+            min_str = f"{min_v*100:.1f}%" if min_v is not None else "无限制"
+            max_str = f"{max_v*100:.1f}%" if max_v is not None else "无限制"
+        else:
+            min_str = f"{min_v:,.0f}" if min_v is not None else "无限制"
+            max_str = f"{max_v:,.0f}" if max_v is not None else "无限制"
         await update.message.reply_text(
             f"✅ 筛选条件已更新\n\n"
             f"**{display_name}** ({name})\n"
@@ -911,22 +920,23 @@ class BotApp:
             current_min = f.get("min")
             current_max = f.get("max")
             
-            # 显示当前值
+                # 显示当前值
             current_text = ""
             if current_min is not None or current_max is not None:
-                min_str = f"{current_min:,.0f}" if current_min is not None else "无限制"
-                max_str = f"{current_max:,.0f}" if current_max is not None else "无限制"
-                # 对于百分比类型，使用更精确的格式
-                if filter_key in ["top10_ratio", "max_holder_ratio"]:
-                    min_str = f"{current_min:.1f}" if current_min is not None else "无限制"
-                    max_str = f"{current_max:.1f}" if current_max is not None else "无限制"
-                current_text = f"\n\n当前设置：<b>{min_str} ~ {max_str}</b>"
+                    # 对于百分比类型，显示百分号并保留一位小数
+                    if filter_key in ["top10_ratio", "max_holder_ratio"]:
+                        min_str = f"{current_min*100:.1f}%" if current_min is not None else "无限制"
+                        max_str = f"{current_max*100:.1f}%" if current_max is not None else "无限制"
+                    else:
+                        min_str = f"{current_min:,.0f}" if current_min is not None else "无限制"
+                        max_str = f"{current_max:,.0f}" if current_max is not None else "无限制"
+                    current_text = f"\n\n当前设置：<b>{min_str} ~ {max_str}</b>"
             
             # 根据类型显示不同的提示（百分比类使用 1-100 的整数）
             if filter_key == "max_holder_ratio":
-                hint = "例如：<code>1 20</code> 或 <code>null 15</code>（输入 1-100 的整数，代表百分比）"
+                hint = "例如：<code>1 20</code> 或 <code>null 15</code>（输入 0-100，可带一位小数，如 2.5 表示 2.5%）"
             elif filter_key in ["top10_ratio"]:
-                hint = "例如：<code>1 30</code> 或 <code>null 20</code>（输入 1-100 的整数，代表百分比）"
+                hint = "例如：<code>1 30</code> 或 <code>null 20</code>（输入 0-100，可带一位小数，如 2.5 表示 2.5%）"
             else:
                 hint = "例如：<code>5000 1000000</code> 或 <code>null 15</code>"
             
