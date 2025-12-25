@@ -1126,18 +1126,21 @@ class BotApp:
                     return
                 
                 # 解析最小/最大值
-                # 对于百分比类型（前十占比 / 最大持仓），要求输入 1-100 的整数，内部以 0-1 存储
+                # 对于百分比类型（前十占比 / 最大持仓），支持0-100的小数，内部以 0-1 存储
                 if filter_key in ("top10_ratio", "max_holder_ratio"):
                     def parse_pct_str(s: str):
                         if s.lower() in ("null", "none", "无", "空", "清空", ""):
                             return None
                         try:
-                            iv = int(s)
+                            fv = float(s)
                         except Exception:
-                            raise ValueError(f"百分比需为整数，范围 0-100：{s}")
-                        if iv < 0 or iv > 100:
+                            raise ValueError(f"百分比需为数字，范围 0-100：{s}")
+                        if fv < 0 or fv > 100:
                             raise ValueError(f"百分比需在 0-100 之间：{s}")
-                        return iv / 100.0
+                        # 允许到一位小数
+                        if abs(fv * 10 - round(fv * 10)) > 0.0001:
+                            raise ValueError("百分比精度最多到0.1位小数")
+                        return fv / 100.0
                     try:
                         min_v = parse_pct_str(parts[0])
                         max_v = parse_pct_str(parts[1])

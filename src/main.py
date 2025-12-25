@@ -180,7 +180,8 @@ async def main():
         
         if not force_push:
             logger.debug(f"🔍 Checking dedupe for: {key[:64]}...")
-            is_seen = await dedupe.seen(key)
+            # 设置去重时间为1天（86400秒），防止重复推送
+            is_seen = await dedupe.seen(key, ttl=86400)
             logger.debug(f"🔍 Dedupe check result: {is_seen}")
             if is_seen:
                 logger.info(f"⏭️  CA already processed for task={task_id_in_use}, skipping: {ca[:8]}...")
