@@ -17,6 +17,8 @@ def _filters_to_dict(f: FilterConfig) -> Dict[str, Dict[str, Optional[float]]]:
         "holder_count": f.holder_count.dict(),
         "max_holder_ratio": f.max_holder_ratio.dict(),
         "trades_5m": f.trades_5m.dict(),
+        "sol_sniffer_score": f.sol_sniffer_score.dict(),
+        "token_sniffer_score": f.token_sniffer_score.dict(),
     }
 
 
@@ -32,6 +34,8 @@ def _filters_from_dict(data: Dict[str, Dict[str, Optional[float]]]) -> FilterCon
         holder_count=fr("holder_count"),
         max_holder_ratio=fr("max_holder_ratio"),
         trades_5m=fr("trades_5m"),
+        sol_sniffer_score=fr("sol_sniffer_score"),
+        token_sniffer_score=fr("token_sniffer_score"),
     )
 
 
@@ -52,11 +56,16 @@ class StateStore:
         if self.path.exists():
             try:
                 data = json.loads(self.path.read_text())
+                default_filters = _filters_to_dict(FilterConfig())
                 # 迁移旧版结构（无 tasks）
                 if "tasks" not in data:
                     legacy_listen = data.get("listen_chats", [])
                     legacy_push = data.get("push_chats", [])
-                    legacy_filters = data.get("filters", _filters_to_dict(FilterConfig()))
+                    legacy_filters = data.get("filters", default_filters)
+                    if not isinstance(legacy_filters, dict):
+                        legacy_filters = {}
+                    for key, value in default_filters.items():
+                        legacy_filters.setdefault(key, dict(value))
                     self._state["tasks"] = {
                         "default": {
                             "enabled": True,
@@ -73,7 +82,12 @@ class StateStore:
                         cfg.setdefault("enabled", False)
                         cfg.setdefault("listen_chats", [])
                         cfg.setdefault("push_chats", [])
-                        cfg.setdefault("filters", _filters_to_dict(FilterConfig()))
+                        filters_cfg = cfg.get("filters") or {}
+                        if not isinstance(filters_cfg, dict):
+                            filters_cfg = {}
+                        for key, value in default_filters.items():
+                            filters_cfg.setdefault(key, dict(value))
+                        cfg["filters"] = filters_cfg
                     self._state.update(data)
                     # 如果没有 current_task，则选第一个
                     if not self._state.get("current_task") and tasks:
@@ -233,5 +247,3 @@ class StateStore:
             self._state["tasks"][task_id]["end_time"] = end_time
             await self._write()
             return True
-
-

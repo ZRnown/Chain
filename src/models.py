@@ -27,6 +27,8 @@ class TokenMetrics(BaseModel):
     top10_ratio: Optional[float] = None
     max_holder_ratio: Optional[float] = None
     top5: List[HolderShare] = Field(default_factory=list)
+    sol_sniffer_score: Optional[float] = None  # SolSniffer 风险评分 (0-100)
+    token_sniffer_score: Optional[float] = None  # TokenSniffer 风险评分 (0-100)
     extra: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -46,6 +48,8 @@ class FilterConfig(BaseModel):
     holder_count: FilterRange = FilterRange()
     max_holder_ratio: FilterRange = FilterRange()
     trades_5m: FilterRange = FilterRange()
+    sol_sniffer_score: FilterRange = FilterRange()  # SolSniffer 评分筛选 (0-100)
+    token_sniffer_score: FilterRange = FilterRange()  # TokenSniffer 评分筛选 (0-100)
 
 
 class ChainConfig(BaseModel):

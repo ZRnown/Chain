@@ -117,20 +117,7 @@ class BotApp:
             text += "`/list_push` - 查看所有推送目标\n\n"
             
             text += "⚙️ **筛选条件设置**\n"
-            text += "`/set_filter <名称> <最小值|null> <最大值|null>` - 设置筛选条件\n"
-            text += "`/list_filters` - 查看所有筛选条件\n\n"
-            text += "筛选条件名称：\n"
-            text += "• `market_cap_usd` - 市值（USD）\n"
-            text += "• `liquidity_usd` - 池子大小（USD）\n"
-            text += "• `open_minutes` - 开盘时间（分钟）\n"
-            text += "• `top10_ratio` - 前十持仓占比（0-1，如0.3表示30%）\n"
-            text += "• `holder_count` - 持有人数\n"
-            text += "• `max_holder_ratio` - 最大持仓占比（0-1）\n"
-            text += "• `trades_5m` - 5分钟交易数\n\n"
-            
-            text += "💡 **示例**\n"
-            text += "`/set_filter market_cap_usd 5000 1000000` - 市值5K-1M\n"
-            text += "`/set_filter top10_ratio null 0.3` - 前十占比<30%\n"
+            text += "请在私聊界面使用按钮「🔍 筛选条件」进入内联菜单设置筛选条件。\n"
         else:
             text += "⚠️ 仅管理员可使用配置命令\n"
         
@@ -275,6 +262,8 @@ class BotApp:
                 "holder_count": "持有人数",
                 "max_holder_ratio": "最大持仓占比",
                 "trades_5m": "5分钟交易数",
+                "sol_sniffer_score": "SolSniffer评分",
+                "token_sniffer_score": "TokenSniffer评分",
             }
             has_filter = False
             for key, display_name in filter_names.items():
@@ -571,6 +560,11 @@ class BotApp:
         else:
             min_v = None if min_s.lower() == "null" else _maybe_float(min_s)
             max_v = None if max_s.lower() == "null" else _maybe_float(max_s)
+            if name in ("sol_sniffer_score", "token_sniffer_score"):
+                for label, val in (("最小值", min_v), ("最大值", max_v)):
+                    if val is not None and (val < 0 or val > 100):
+                        await update.message.reply_text(f"❌ {label}需在 0-100 之间")
+                        return
         try:
             await self.state.set_filter(name, min_v, max_v)
         except Exception as e:
@@ -585,6 +579,8 @@ class BotApp:
             "holder_count": "持有人数",
             "max_holder_ratio": "最大持仓占比",
             "trades_5m": "5分钟交易数",
+            "sol_sniffer_score": "SolSniffer评分",
+            "token_sniffer_score": "TokenSniffer评分",
         }
         display_name = filter_names.get(name, name)
         # 格式化显示：百分比类型显示为百分号并保留一位小数
@@ -606,8 +602,7 @@ class BotApp:
         if update.effective_user.id not in self.admin_ids:
             await update.message.reply_text("❌ 无权限")
             return
-        snap = await self.state.snapshot()
-        filters_cfg = snap.get("filters", {})
+        filters_cfg = (await self.state.filters_cfg()).dict()
         
         filter_names = {
             "market_cap_usd": "市值(USD)",
@@ -617,6 +612,8 @@ class BotApp:
             "holder_count": "持有人数",
             "max_holder_ratio": "最大持仓占比 (0-1)",
             "trades_5m": "5分钟交易数",
+            "sol_sniffer_score": "SolSniffer评分 (0-100)",
+            "token_sniffer_score": "TokenSniffer评分 (0-100)",
         }
         
         text = "🔍 **筛选条件列表**\n\n"
@@ -782,6 +779,8 @@ class BotApp:
             "holder_count": "👥 持有人数",
             "max_holder_ratio": "🐳 最大持仓占比",
             "trades_5m": "📈 5分钟交易数",
+            "sol_sniffer_score": "🛡️ SolSniffer评分",
+            "token_sniffer_score": "🛡️ TokenSniffer评分",
         }
         
         # 构建菜单文本，显示已设置的值
@@ -909,6 +908,8 @@ class BotApp:
                 "holder_count": "持有人数",
                 "max_holder_ratio": "最大持仓占比",
                 "trades_5m": "5分钟交易数",
+                "sol_sniffer_score": "SolSniffer评分",
+                "token_sniffer_score": "TokenSniffer评分",
             }
             display_name = filter_names.get(filter_key, filter_key)
             
@@ -937,6 +938,8 @@ class BotApp:
                 hint = "例如：<code>1 20</code> 或 <code>null 15</code>（输入 0-100，可带一位小数，如 2.5 表示 2.5%）"
             elif filter_key in ["top10_ratio"]:
                 hint = "例如：<code>1 30</code> 或 <code>null 20</code>（输入 0-100，可带一位小数，如 2.5 表示 2.5%）"
+            elif filter_key in ("sol_sniffer_score", "token_sniffer_score"):
+                hint = "例如：<code>60 90</code> 或 <code>null 80</code>（输入 0-100）"
             else:
                 hint = "例如：<code>5000 1000000</code> 或 <code>null 15</code>"
             
@@ -956,8 +959,17 @@ class BotApp:
             await self.list_filters_callback(query)
         elif data == "reset_filters":
             # 重置所有筛选条件
-            filter_keys = ["market_cap_usd", "liquidity_usd", "open_minutes", "top10_ratio", 
-                          "holder_count", "max_holder_ratio", "trades_5m"]
+            filter_keys = [
+                "market_cap_usd",
+                "liquidity_usd",
+                "open_minutes",
+                "top10_ratio",
+                "holder_count",
+                "max_holder_ratio",
+                "trades_5m",
+                "sol_sniffer_score",
+                "token_sniffer_score",
+            ]
             for key in filter_keys:
                 await self.state.set_filter(key, None, None)
             await query.edit_message_text("✅ 已重置当前任务的所有筛选条件")
@@ -1159,6 +1171,11 @@ class BotApp:
                     except ValueError:
                         await update.message.reply_text(f"❌ 最大值格式错误：<code>{parts[1]}</code>", parse_mode="HTML")
                         return
+                    if filter_key in ("sol_sniffer_score", "token_sniffer_score"):
+                        for label, val in (("最小值", min_v), ("最大值", max_v)):
+                            if val is not None and (val < 0 or val > 100):
+                                await update.message.reply_text(f"❌ {label}需在 0-100 之间", parse_mode="HTML")
+                                return
                 
                 await self.state.set_filter(filter_key, min_v, max_v)
                 
@@ -1167,6 +1184,8 @@ class BotApp:
                     "open_minutes": "开盘时间(分钟)", "top10_ratio": "前十占比",
                     "holder_count": "持有人数", "max_holder_ratio": "最大持仓占比",
                     "trades_5m": "5分钟交易数",
+                    "sol_sniffer_score": "SolSniffer评分",
+                    "token_sniffer_score": "TokenSniffer评分",
                 }
                 display_name = filter_names.get(filter_key, filter_key)
                 display_name_escaped = html.escape(str(display_name))
@@ -1807,6 +1826,8 @@ class BotApp:
             "holder_count": "持有人数",
             "max_holder_ratio": "最大持仓占比",
             "trades_5m": "5分钟交易数",
+            "sol_sniffer_score": "SolSniffer评分",
+            "token_sniffer_score": "TokenSniffer评分",
         }
         text = ""
         for key, display_name in filter_names.items():
@@ -1844,8 +1865,6 @@ class BotApp:
             BotCommand("add_push", "添加推送群组（管理员）"),
             BotCommand("del_push", "删除推送群组（管理员）"),
             BotCommand("list_push", "查看推送群组列表（管理员）"),
-            BotCommand("set_filter", "设置筛选条件（管理员）"),
-            BotCommand("list_filters", "查看筛选条件列表（管理员）"),
         ]
         # Set commands menu for all users
         await self.app.bot.set_my_commands(commands)
@@ -1892,4 +1911,3 @@ def _maybe_float(s: str):
         return float(s)
     except Exception:
         raise ValueError("not a number")
-

@@ -18,6 +18,8 @@ logger = logging.getLogger("ca_filter_bot.data_fetcher")
 
 
 DEX_TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens/{address}"
+SOL_SNIFFER_API_KEY = "gbnyroq3tsblgsm8c9nofinecwmecd"
+TOKEN_SNIFFER_API_KEY = "d69930b10c2b535db46463568fcfa38a7d9c5e95"
 
 
 class DataFetcher:
@@ -33,7 +35,7 @@ class DataFetcher:
 
     async def fetch_all(self, chain: str, address: str) -> TokenMetrics:
         logger.info(f"🔍 Fetching data for {chain} - {address[:8]}...")
-        
+
         # 1) 优先使用 GMGN 基础接口（tls_client，带重试，快速）
         metrics = await self.gmgn_basic.fetch(chain, address)
         if metrics:
@@ -43,18 +45,19 @@ class DataFetcher:
             if holders_data and holders_data.get("max_holder_ratio") is not None:
                 metrics.max_holder_ratio = holders_data["max_holder_ratio"]
                 logger.info(f"✅ Updated max_holder_ratio from top holders: {metrics.max_holder_ratio:.4f}")
-            return metrics
+        else:
+            # 2) GMGN 基础接口失败，尝试全量接口（curl_cffi）
+            logger.info("⚠️ GMGN basic failed, trying full interface...")
+            metrics = await self._fetch_gmgn(chain, address)
+            if not metrics:
+                # 3) DexScreener 回退
+                logger.info("⚠️ GMGN failed, switching to DexScreener...")
+                metrics = await self._fetch_dex(chain, address)
 
-        # 2) GMGN 基础接口失败，尝试全量接口（curl_cffi）
-        logger.info("⚠️ GMGN basic failed, trying full interface...")
-        metrics = await self._fetch_gmgn(chain, address)
+        # 4) 获取风险评分（SolSniffer 和 TokenSniffer）
         if metrics:
-            logger.info("✅ GMGN full interface success")
-            return metrics
-
-        # 3) DexScreener 回退
-        logger.info("⚠️ GMGN failed, switching to DexScreener...")
-        metrics = await self._fetch_dex(chain, address)
+            await self._fetch_risk_scores(metrics)
+            logger.info(f"✅ Risk scores fetched: SolSniffer={metrics.sol_sniffer_score}, TokenSniffer={metrics.token_sniffer_score}")
 
         return metrics
     
@@ -612,7 +615,110 @@ class DataFetcher:
 
     async def _gmgn_ratios(self, chain: str, address: str) -> Tuple[Optional[float], Optional[float]]:
         # 简化版单独获取 - 如果主接口失败，这里也失败
-        return None, None 
+        return None, None
+
+    async def _fetch_risk_scores(self, metrics: TokenMetrics) -> None:
+        """获取 SolSniffer 和 TokenSniffer 风险评分"""
+        # 并行获取两个评分
+        sol_task = self._fetch_sol_sniffer_score(metrics.chain, metrics.address)
+        token_task = self._fetch_token_sniffer_score(metrics.chain, metrics.address)
+
+        sol_score, token_score = await asyncio.gather(sol_task, token_task)
+
+        metrics.sol_sniffer_score = sol_score
+        metrics.token_sniffer_score = token_score
+
+    async def _fetch_sol_sniffer_score(self, chain: str, address: str) -> Optional[float]:
+        """获取 SolSniffer 风险评分 (0-100)"""
+        try:
+            if chain.lower() not in ("sol", "solana"):
+                return None
+
+            # 获取 API key
+            api_key = SOL_SNIFFER_API_KEY
+            if not api_key:
+                logger.debug("SolSniffer API key not configured")
+                return None
+
+            # SolSniffer API v2.0 端点：GET /token/{address}
+            url = f"https://solsniffer.com/api/v2/token/{address}"
+
+            # 使用 httpx 客户端请求，API key 作为 Header
+            headers = {"X-API-KEY": api_key}
+            resp = await self.client.get(url, headers=headers, timeout=10)
+
+            if resp.status_code == 200:
+                data = resp.json()
+                # 根据API文档，返回格式为 tokenData.score
+                token_data = data.get("tokenData", {})
+                score = token_data.get("score")
+                if score is not None and isinstance(score, (int, float)):
+                    logger.info(f"✅ SolSniffer score fetched: {score}")
+                    return float(score)
+                else:
+                    logger.debug(f"SolSniffer API returned invalid score: {score}")
+            else:
+                logger.debug(f"SolSniffer API returned status {resp.status_code}")
+
+        except Exception as e:
+            logger.debug(f"Error fetching SolSniffer score: {e}")
+
+        return None
+
+    async def _fetch_token_sniffer_score(self, chain: str, address: str) -> Optional[float]:
+        """获取 TokenSniffer 风险评分 (0-100)"""
+        try:
+            # 根据链类型确定 TokenSniffer 的 chain_id
+            token_sniffer_chain_map = {
+                "solana": 1399811149,  # Solana chain ID in TokenSniffer
+                "bsc": 56,            # BSC chain ID
+                "ethereum": 1,        # Ethereum chain ID
+                "polygon": 137,       # Polygon chain ID
+                "matic": 137,
+                # 添加其他支持的链
+            }
+
+            sniffer_chain_id = token_sniffer_chain_map.get(chain.lower())
+            if sniffer_chain_id is None:
+                logger.debug(f"TokenSniffer does not support chain: {chain}")
+                return None
+
+            # 获取 API key
+            api_key = TOKEN_SNIFFER_API_KEY
+            if not api_key:
+                logger.debug("TokenSniffer API key not configured")
+                return None
+
+            url = f"https://tokensniffer.com/api/v2/tokens/{sniffer_chain_id}/{address}"
+
+            # 使用 httpx 客户端请求
+            params = {
+                "apikey": api_key,
+                "include_metrics": "true",
+            }
+            resp = await self.client.get(url, params=params, timeout=10)
+
+            if resp.status_code == 200:
+                data = resp.json()
+                metrics = data.get("metrics") or data.get("data", {}).get("metrics", {})
+                score = None
+                if isinstance(metrics, dict):
+                    score = metrics.get("score")
+                if score is None:
+                    tests = data.get("tests", {})
+                    if isinstance(tests, dict):
+                        score = tests.get("score")
+                if score is not None and isinstance(score, (int, float)):
+                    return float(score)
+                else:
+                    logger.debug(f"TokenSniffer API returned invalid score: {score}")
+            else:
+                logger.debug(f"TokenSniffer API returned status {resp.status_code}")
+
+        except Exception as e:
+            logger.debug(f"Error fetching TokenSniffer score: {e}")
+
+        return None 
 
 
 

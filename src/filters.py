@@ -17,6 +17,8 @@ def apply_filters(metrics: TokenMetrics, cfg: FilterConfig) -> Tuple[bool, List[
         ("holder_count", metrics.holders, cfg.holder_count),
         ("max_holder_ratio", metrics.max_holder_ratio, cfg.max_holder_ratio),
         ("trades_5m", metrics.trades_5m, cfg.trades_5m),
+        ("sol_sniffer_score", metrics.sol_sniffer_score, cfg.sol_sniffer_score),
+        ("token_sniffer_score", metrics.token_sniffer_score, cfg.token_sniffer_score),
     ]
 
     for name, value, fr in checks:

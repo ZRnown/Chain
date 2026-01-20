@@ -79,11 +79,16 @@ def build_caption(m: TokenMetrics, filtered: Optional[List[str]] = None) -> str:
     
     # 第三行：持有 | 前10 | 5分交易 | 最大持仓
     line3 = f"👥持有: {fmt_int(m.holders)} | 🔟Top10: {fmt_pct(m.top10_ratio)} | 📉5m交易: {tx_5m} | 🐳最大: {fmt_pct(m.max_holder_ratio, precision=1)}"
+
+    # 第四行：风险评分 (SolSniffer | TokenSniffer)
+    sol_score = f"{m.sol_sniffer_score:.1f}" if m.sol_sniffer_score is not None else "N/A"
+    token_score = f"{m.token_sniffer_score:.1f}" if m.token_sniffer_score is not None else "N/A"
+    line4 = f"🛡️风险评分: SolSniffer {sol_score} | TokenSniffer {token_score}"
+
+    # 第五行：链接
+    line5 = f"🔗 <a href='{gmgn_url}'>点击前往 GMGN 查看详情 ↗️</a>"
     
-    # 底部：链接
-    line4 = f"🔗 <a href='{gmgn_url}'>点击前往 GMGN 查看详情 ↗️</a>"
-    
-    content = [title_line, line1, line2, line3, line4]
+    content = [title_line, line1, line2, line3, line4, line5]
     
     if filtered:
         content.append(f"\n🚫 <b>已过滤原因:</b> {', '.join(filtered)}")
