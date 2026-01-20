@@ -704,7 +704,7 @@ class BotApp:
         elif text == "🔍 筛选条件":
             await self.show_filter_menu(update.message)
         elif text == "📋 查看任务":
-            await self.cmd_tasks(update, context)
+            await self.show_task_list_message(update.message)
         elif text == "🗓️ 任务管理":
             await self.show_task_menu(update.message)
         else:
@@ -1592,7 +1592,17 @@ class BotApp:
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=reply_markup)
     
+    async def show_task_list_message(self, message):
+        """显示任务列表（用于键盘菜单）"""
+        text, reply_markup = await self._build_task_list_message()
+        await message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
+
     async def list_tasks_callback(self, query):
+        """显示任务列表（用于内联按钮）"""
+        text, reply_markup = await self._build_task_list_message()
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=reply_markup)
+
+    async def _build_task_list_message(self) -> Tuple[str, InlineKeyboardMarkup]:
         snap = await self.state.snapshot()
         tasks = snap.get("tasks", {})
         current = snap.get("current_task")
@@ -1602,50 +1612,43 @@ class BotApp:
             lines.append("📋 <b>任务列表</b>\n\n暂无任务")
         else:
             lines.append(f"📋 <b>任务列表</b> ({len(tasks)}个)\n")
-            # 从 task_scheduler 获取任务的 interval_minutes
             scheduler_tasks = {}
             if self.scheduler:
                 for st in self.scheduler.list_tasks():
                     scheduler_tasks[st.get("id")] = st
-            
+
             for tid, cfg in tasks.items():
-                # 优先使用 scheduler 中的实际状态（如果存在）
                 actual_enabled = cfg.get("enabled")
                 if tid in scheduler_tasks:
                     st = scheduler_tasks[tid]
                     actual_enabled = st.get("enabled", actual_enabled)
-                    # 如果 scheduler 中的状态与 state 不一致，同步更新 state
                     if actual_enabled != cfg.get("enabled"):
                         await self.state.set_task_enabled(tid, actual_enabled)
-                
-                # 检查时间窗：如果设置了时间窗且不在时间窗内，强制显示为暂停
+
                 start_time = cfg.get("start_time")
                 end_time = cfg.get("end_time")
                 has_window = start_time or end_time
                 if has_window:
                     in_window = self._is_in_time_window(start_time, end_time)
                     if not in_window:
-                        # 不在时间窗内，强制显示为暂停
                         actual_enabled = False
-                
+
                 status = "✅ 启用" if actual_enabled else "⏸️ 暂停"
                 tag = "（当前）" if tid == current else ""
                 listen_count = len(cfg.get("listen_chats", []))
                 push_count = len(cfg.get("push_chats", []))
-                # 获取定时信息
                 interval_minutes = None
                 next_run_time = None
                 if tid in scheduler_tasks:
                     st = scheduler_tasks[tid]
                     interval_minutes = st.get("interval_minutes")
-                    # 获取下次运行时间（UTC+8）
                     next_run_ts = st.get("next_run")
                     if next_run_ts:
                         from datetime import datetime, timezone, timedelta
                         tz_shanghai = timezone(timedelta(hours=8))
                         next_run_dt = datetime.fromtimestamp(next_run_ts, tz=tz_shanghai)
                         next_run_time = next_run_dt.strftime('%m-%d %H:%M')
-                
+
                 lines.append(f"• <b>{html.escape(tid)}</b> {tag} | {status}")
                 interval_str = f" | ⏰ 每{interval_minutes}分钟" if interval_minutes else ""
                 next_run_str = f" | 下次: {next_run_time}" if next_run_time else ""
@@ -1653,19 +1656,18 @@ class BotApp:
                 if start_time or end_time:
                     window_str = f" | 时间窗: {start_time or '--:--'} ~ {end_time or '--:--'}"
                 lines.append(f"  监听: {listen_count} | 推送: {push_count}{interval_str}{next_run_str}{window_str}")
+
                 btn_row = []
                 if tid == current:
                     btn_row.append(InlineKeyboardButton("✅ 当前", callback_data="noop"))
                 else:
                     btn_row.append(InlineKeyboardButton(f"切换 {tid}", callback_data=f"task_select:{tid}"))
-                # 检查时间窗，决定是否允许手动启用/禁用（使用上面已经获取的 start_time 和 end_time）
+
                 can_manual_toggle = True
                 if has_window:
                     in_window = self._is_in_time_window(start_time, end_time)
-                    # 只有在时间窗内或没有设置时间窗时才能手动切换
                     can_manual_toggle = in_window
-                
-                # 使用实际状态（优先 scheduler）
+
                 if actual_enabled:
                     if can_manual_toggle:
                         btn_row.append(InlineKeyboardButton("⏸️ 暂停", callback_data=f"task_disable:{tid}"))
@@ -1676,13 +1678,15 @@ class BotApp:
                         btn_row.append(InlineKeyboardButton("▶️ 启用", callback_data=f"task_enable:{tid}"))
                     else:
                         btn_row.append(InlineKeyboardButton("▶️ 启用", callback_data="noop"))
+
                 btn_row.append(InlineKeyboardButton("⏰ 时间窗", callback_data=f"task_window:{tid}"))
                 btn_row.append(InlineKeyboardButton("🗑️ 删除", callback_data=f"task_delete:{tid}"))
                 keyboard.append(btn_row)
                 lines.append("")
+
         keyboard.append([InlineKeyboardButton("⬅️ 返回", callback_data="back_task_menu")])
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=reply_markup)
+        return "\n".join(lines), reply_markup
 
     async def list_clients_callback(self, query):
         if not self.scheduler or not self.scheduler.client_pool:
