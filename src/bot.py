@@ -88,7 +88,7 @@ class BotApp:
             keyboard = [
                 [KeyboardButton("📊 查看配置"), KeyboardButton("🔍 筛选条件")],
                 [KeyboardButton("👥 监听群组"), KeyboardButton("📤 推送目标")],
-                [KeyboardButton("🗓️ 任务管理")],
+                [KeyboardButton("📋 查看任务"), KeyboardButton("🗓️ 任务管理")],
             ]
             reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
             text += "\n\n✅ **管理员权限已激活**\n使用下方按钮进行配置"
@@ -703,6 +703,8 @@ class BotApp:
             await self.show_push_menu(update.message)
         elif text == "🔍 筛选条件":
             await self.show_filter_menu(update.message)
+        elif text == "📋 查看任务":
+            await self.cmd_tasks(update, context)
         elif text == "🗓️ 任务管理":
             await self.show_task_menu(update.message)
         else:
