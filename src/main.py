@@ -15,7 +15,7 @@ from .bot import BotApp, chain_hint, CA_PATTERN
 from .chart import render_chart
 from .client_pool import ClientPool
 from .data_fetcher import DataFetcher
-from .filters import apply_filters
+from .filters import apply_filters, apply_basic_filters, apply_risk_filters, need_risk_check
 from .models import TokenMetrics
 from .state import StateStore
 from .storage import DedupeStore
@@ -155,6 +155,7 @@ async def main():
 
     fetcher = DataFetcher(
         gmgn_headers=gmgn_headers,
+        get_api_key=state.get_api_key,  # 传入获取 API Key 的回调函数
     )
     logger.info("📡 DataFetcher initialized")
     
@@ -235,14 +236,36 @@ async def main():
                         logger.info(f"⏰ First trade time from K-line: {first_trade_dt}")
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to extract first trade time from K-line: {e}")
-            
-            # 过滤检查
+
+            # 过滤检查（分两步：先基础筛选，通过后再获取风险评分并筛选）
             filters_cfg = await state.filters_cfg(task_id=task_id_in_use)
-            passed, reasons = apply_filters(metrics, filters_cfg)
-            logger.info(f"🔍 Filter check: {'✅ PASSED' if passed else '❌ FAILED'}")
-            if reasons:
-                logger.info(f"   Reasons: {', '.join(reasons)}")
-            
+
+            # 第一步：基础筛选（不包含风险评分）
+            basic_passed, basic_reasons = apply_basic_filters(metrics, filters_cfg)
+            logger.info(f"🔍 Basic filter check: {'✅ PASSED' if basic_passed else '❌ FAILED'}")
+            if basic_reasons:
+                logger.info(f"   Reasons: {', '.join(basic_reasons)}")
+
+            # 第二步：如果基础筛选通过且需要风险评分筛选，则获取风险评分
+            passed = basic_passed
+            reasons = basic_reasons.copy()
+
+            if basic_passed and need_risk_check(filters_cfg):
+                logger.info(f"🛡️ Basic filters passed, fetching risk scores...")
+                await fetcher.fetch_risk_scores(metrics)
+                logger.info(f"✅ Risk scores fetched: SolSniffer={metrics.sol_sniffer_score}, TokenSniffer={metrics.token_sniffer_score}")
+
+                # 应用风险评分筛选
+                risk_passed, risk_reasons = apply_risk_filters(metrics, filters_cfg)
+                logger.info(f"🔍 Risk filter check: {'✅ PASSED' if risk_passed else '❌ FAILED'}")
+                if risk_reasons:
+                    logger.info(f"   Reasons: {', '.join(risk_reasons)}")
+
+                passed = risk_passed
+                reasons.extend(risk_reasons)
+            elif not basic_passed:
+                logger.info(f"⏭️ Basic filters failed, skipping risk score fetch to save API calls")
+
             elapsed = asyncio.get_event_loop().time() - start_time
             logger.info(f"⏱️  Total processing time: {elapsed:.2f}s")
             

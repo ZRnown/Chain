@@ -18,8 +18,9 @@ logger = logging.getLogger("ca_filter_bot.data_fetcher")
 
 
 DEX_TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens/{address}"
-SOL_SNIFFER_API_KEY = "gbnyroq3tsblgsm8c9nofinecwmecd"
-TOKEN_SNIFFER_API_KEY = "d69930b10c2b535db46463568fcfa38a7d9c5e95"
+# 默认 API Key（如果 state 中没有设置，则使用这些默认值）
+DEFAULT_SOL_SNIFFER_API_KEY = "gbnyroq3tsblgsm8c9nofinecwmecd"
+DEFAULT_TOKEN_SNIFFER_API_KEY = "d69930b10c2b535db46463568fcfa38a7d9c5e95"
 
 
 class DataFetcher:
@@ -27,11 +28,14 @@ class DataFetcher:
         self,
         session: Optional[httpx.AsyncClient] = None,
         gmgn_headers: Optional[Dict[str, str]] = None,
+        get_api_key: Optional[callable] = None,
     ):
         # verify=False 仅用于调试，生产环境建议设为 True
         self.client = session or httpx.AsyncClient(timeout=15, verify=True)
         self.gmgn_headers = gmgn_headers or {}
         self.gmgn_basic = GMGNBasicFetcher(extra_headers=self.gmgn_headers)
+        # 获取 API Key 的回调函数，签名: async def get_api_key(key_name: str) -> Optional[str]
+        self._get_api_key = get_api_key
 
     async def fetch_all(self, chain: str, address: str) -> TokenMetrics:
         logger.info(f"🔍 Fetching data for {chain} - {address[:8]}...")
@@ -54,11 +58,7 @@ class DataFetcher:
                 logger.info("⚠️ GMGN failed, switching to DexScreener...")
                 metrics = await self._fetch_dex(chain, address)
 
-        # 4) 获取风险评分（SolSniffer 和 TokenSniffer）
-        if metrics:
-            await self._fetch_risk_scores(metrics)
-            logger.info(f"✅ Risk scores fetched: SolSniffer={metrics.sol_sniffer_score}, TokenSniffer={metrics.token_sniffer_score}")
-
+        # 注意：风险评分不再在这里获取，改为在筛选通过后单独调用 fetch_risk_scores
         return metrics
     
 
@@ -617,8 +617,8 @@ class DataFetcher:
         # 简化版单独获取 - 如果主接口失败，这里也失败
         return None, None
 
-    async def _fetch_risk_scores(self, metrics: TokenMetrics) -> None:
-        """获取 SolSniffer 和 TokenSniffer 风险评分"""
+    async def fetch_risk_scores(self, metrics: TokenMetrics) -> None:
+        """获取 SolSniffer 和 TokenSniffer 风险评分（公开方法，供外部调用）"""
         # 并行获取两个评分
         sol_task = self._fetch_sol_sniffer_score(metrics.chain, metrics.address)
         token_task = self._fetch_token_sniffer_score(metrics.chain, metrics.address)
@@ -634,8 +634,12 @@ class DataFetcher:
             if chain.lower() not in ("sol", "solana"):
                 return None
 
-            # 获取 API key
-            api_key = SOL_SNIFFER_API_KEY
+            # 获取 API key（优先从 state 获取，否则使用默认值）
+            api_key = None
+            if self._get_api_key:
+                api_key = await self._get_api_key("sol_sniffer")
+            if not api_key:
+                api_key = DEFAULT_SOL_SNIFFER_API_KEY
             if not api_key:
                 logger.debug("SolSniffer API key not configured")
                 return None
@@ -683,8 +687,12 @@ class DataFetcher:
                 logger.debug(f"TokenSniffer does not support chain: {chain}")
                 return None
 
-            # 获取 API key
-            api_key = TOKEN_SNIFFER_API_KEY
+            # 获取 API key（优先从 state 获取，否则使用默认值）
+            api_key = None
+            if self._get_api_key:
+                api_key = await self._get_api_key("token_sniffer")
+            if not api_key:
+                api_key = DEFAULT_TOKEN_SNIFFER_API_KEY
             if not api_key:
                 logger.debug("TokenSniffer API key not configured")
                 return None

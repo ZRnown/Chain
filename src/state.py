@@ -46,9 +46,14 @@ class StateStore:
         # 多任务配置：
         # - current_task: 当前选中的任务ID
         # - tasks: {task_id: {"enabled": bool, "listen_chats": [], "push_chats": [], "filters": {...}}}
+        # - api_keys: {"sol_sniffer": "...", "token_sniffer": "..."}
         self._state = {
             "current_task": None,
             "tasks": {},
+            "api_keys": {
+                "sol_sniffer": None,
+                "token_sniffer": None,
+            },
         }
         self._load_existing()
 
@@ -92,6 +97,12 @@ class StateStore:
                     # 如果没有 current_task，则选第一个
                     if not self._state.get("current_task") and tasks:
                         self._state["current_task"] = list(tasks.keys())[0]
+                # 确保 api_keys 字段存在
+                if "api_keys" not in self._state:
+                    self._state["api_keys"] = {"sol_sniffer": None, "token_sniffer": None}
+                else:
+                    self._state["api_keys"].setdefault("sol_sniffer", None)
+                    self._state["api_keys"].setdefault("token_sniffer", None)
             except Exception:
                 # ignore corrupt state; keep defaults
                 pass
@@ -247,3 +258,23 @@ class StateStore:
             self._state["tasks"][task_id]["end_time"] = end_time
             await self._write()
             return True
+
+    # --- API Keys ---
+    async def set_api_key(self, key_name: str, value: Optional[str]) -> bool:
+        """设置 API Key (sol_sniffer 或 token_sniffer)"""
+        async with self.lock:
+            if key_name not in ("sol_sniffer", "token_sniffer"):
+                return False
+            self._state["api_keys"][key_name] = value
+            await self._write()
+            return True
+
+    async def get_api_key(self, key_name: str) -> Optional[str]:
+        """获取 API Key"""
+        async with self.lock:
+            return self._state.get("api_keys", {}).get(key_name)
+
+    async def get_all_api_keys(self) -> Dict[str, Optional[str]]:
+        """获取所有 API Keys"""
+        async with self.lock:
+            return dict(self._state.get("api_keys", {}))

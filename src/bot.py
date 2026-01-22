@@ -89,6 +89,7 @@ class BotApp:
                 [KeyboardButton("📊 查看配置"), KeyboardButton("🔍 筛选条件")],
                 [KeyboardButton("👥 监听群组"), KeyboardButton("📤 推送目标")],
                 [KeyboardButton("📋 查看任务"), KeyboardButton("🗓️ 任务管理")],
+                [KeyboardButton("🔑 API设置")],
             ]
             reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
             text += "\n\n✅ **管理员权限已激活**\n使用下方按钮进行配置"
@@ -707,6 +708,8 @@ class BotApp:
             await self.show_task_list_message(update.message)
         elif text == "🗓️ 任务管理":
             await self.show_task_menu(update.message)
+        elif text == "🔑 API设置":
+            await self.show_api_settings_menu(update.message)
         else:
             # 可能是输入的值（用于设置筛选条件）
             # 检查是否有待处理的设置
@@ -837,7 +840,46 @@ class BotApp:
         else:
             # 是 Message 对象，使用 reply_text
             await message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
-    
+
+    async def show_api_settings_menu(self, message, edit: bool = False):
+        """显示 API Key 设置菜单"""
+        api_keys = await self.state.get_all_api_keys()
+        sol_key = api_keys.get("sol_sniffer")
+        token_key = api_keys.get("token_sniffer")
+
+        # 显示 API Key 状态（隐藏部分字符）
+        def mask_key(key):
+            if not key:
+                return "未设置"
+            if len(key) <= 8:
+                return key[:2] + "***" + key[-2:]
+            return key[:4] + "***" + key[-4:]
+
+        sol_status = f"✅ {mask_key(sol_key)}" if sol_key else "❌ 未设置"
+        token_status = f"✅ {mask_key(token_key)}" if token_key else "❌ 未设置"
+
+        text = (
+            "🔑 <b>API Key 设置</b>\n\n"
+            f"🛡️ <b>SolSniffer</b>: {sol_status}\n"
+            f"🛡️ <b>TokenSniffer</b>: {token_status}\n\n"
+            "💡 点击下方按钮设置或更新 API Key"
+        )
+
+        keyboard = [
+            [InlineKeyboardButton("🛡️ 设置 SolSniffer Key", callback_data="set_api_sol_sniffer")],
+            [InlineKeyboardButton("🛡️ 设置 TokenSniffer Key", callback_data="set_api_token_sniffer")],
+            [InlineKeyboardButton("🗑️ 清除 SolSniffer Key", callback_data="clear_api_sol_sniffer")],
+            [InlineKeyboardButton("🗑️ 清除 TokenSniffer Key", callback_data="clear_api_token_sniffer")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        if edit and hasattr(message, 'edit_message_text'):
+            await message.edit_message_text(text, parse_mode="HTML", reply_markup=reply_markup)
+        elif hasattr(message, 'edit_message_text'):
+            await message.edit_message_text(text, parse_mode="HTML", reply_markup=reply_markup)
+        else:
+            await message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
+
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理内联按钮回调"""
         query = update.callback_query
@@ -1091,7 +1133,37 @@ class BotApp:
             reply_markup = InlineKeyboardMarkup(keyboard)
             text = "🗓️ <b>任务管理</b>\n\n支持多客户端、多任务定时推送。\n请选择操作："
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=reply_markup)
-        
+
+        # API Key 设置
+        elif data == "set_api_sol_sniffer":
+            await query.edit_message_text(
+                "🛡️ <b>设置 SolSniffer API Key</b>\n\n"
+                "请发送您的 SolSniffer API Key：\n\n"
+                "💡 获取方式：访问 https://solsniffer.com 注册并获取 API Key",
+                parse_mode="HTML"
+            )
+            if not hasattr(context, 'user_data'):
+                context.user_data = {}
+            context.user_data[f'{user_id}_waiting'] = 'set_api_sol_sniffer'
+        elif data == "set_api_token_sniffer":
+            await query.edit_message_text(
+                "🛡️ <b>设置 TokenSniffer API Key</b>\n\n"
+                "请发送您的 TokenSniffer API Key：\n\n"
+                "💡 获取方式：访问 https://tokensniffer.com 注册并获取 API Key",
+                parse_mode="HTML"
+            )
+            if not hasattr(context, 'user_data'):
+                context.user_data = {}
+            context.user_data[f'{user_id}_waiting'] = 'set_api_token_sniffer'
+        elif data == "clear_api_sol_sniffer":
+            await self.state.set_api_key("sol_sniffer", None)
+            await query.answer("✅ SolSniffer API Key 已清除")
+            await self.show_api_settings_menu(query, edit=True)
+        elif data == "clear_api_token_sniffer":
+            await self.state.set_api_key("token_sniffer", None)
+            await query.answer("✅ TokenSniffer API Key 已清除")
+            await self.show_api_settings_menu(query, edit=True)
+
     async def handle_setting_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
         """处理设置输入"""
         user_id = update.effective_user.id
@@ -1311,6 +1383,30 @@ class BotApp:
                     f"✅ 已创建任务并切换为当前：{name}\n"
                     f"（默认暂停，请在任务列表启用；继续配置监听群、推送目标、筛选条件）\n"
                     f"已创建数量：{count}",
+                    parse_mode="HTML"
+                )
+            elif waiting == 'set_api_sol_sniffer':
+                api_key = text.strip()
+                if not api_key:
+                    await update.message.reply_text("❌ API Key 不能为空")
+                    return
+                await self.state.set_api_key("sol_sniffer", api_key)
+                context.user_data[f'{user_id}_waiting'] = None
+                await update.message.reply_text(
+                    f"✅ SolSniffer API Key 已设置\n\n"
+                    f"Key: <code>{api_key[:4]}***{api_key[-4:]}</code>",
+                    parse_mode="HTML"
+                )
+            elif waiting == 'set_api_token_sniffer':
+                api_key = text.strip()
+                if not api_key:
+                    await update.message.reply_text("❌ API Key 不能为空")
+                    return
+                await self.state.set_api_key("token_sniffer", api_key)
+                context.user_data[f'{user_id}_waiting'] = None
+                await update.message.reply_text(
+                    f"✅ TokenSniffer API Key 已设置\n\n"
+                    f"Key: <code>{api_key[:4]}***{api_key[-4:]}</code>",
                     parse_mode="HTML"
                 )
             elif waiting.startswith('set_window:'):
