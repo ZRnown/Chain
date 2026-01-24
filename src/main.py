@@ -251,13 +251,12 @@ async def main():
             reasons = basic_reasons.copy()
 
             if basic_passed:
-                # 总是获取风险评分（用于在推送消息中显示）
-                logger.info(f"🛡️ Basic filters passed, fetching risk scores...")
-                await fetcher.fetch_risk_scores(metrics)
-                logger.info(f"✅ Risk scores fetched: SolSniffer={metrics.sol_sniffer_score}, TokenSniffer={metrics.token_sniffer_score}")
-
-                # 只有设置了风险评分筛选条件时才进行筛选
+                # 只有设置了风险评分筛选条件时才获取风险评分并进行筛选
                 if need_risk_check(filters_cfg):
+                    logger.info(f"🛡️ Risk filter configured, fetching risk scores...")
+                    await fetcher.fetch_risk_scores(metrics)
+                    logger.info(f"✅ Risk scores fetched: SolSniffer={metrics.sol_sniffer_score}, TokenSniffer={metrics.token_sniffer_score}")
+
                     risk_passed, risk_reasons = apply_risk_filters(metrics, filters_cfg)
                     logger.info(f"🔍 Risk filter check: {'✅ PASSED' if risk_passed else '❌ FAILED'}")
                     if risk_reasons:
@@ -265,7 +264,7 @@ async def main():
                     passed = risk_passed
                     reasons.extend(risk_reasons)
                 else:
-                    logger.info(f"⏭️ No risk filter configured, skipping risk filter check")
+                    logger.info(f"⏭️ No risk filter configured, skipping risk score fetch and filter")
             else:
                 logger.info(f"⏭️ Basic filters failed, skipping risk score fetch")
 

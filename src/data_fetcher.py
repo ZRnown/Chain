@@ -660,9 +660,9 @@ class DataFetcher:
                     logger.info(f"✅ SolSniffer score fetched: {score}")
                     return float(score)
                 else:
-                    logger.debug(f"SolSniffer API returned invalid score: {score}")
+                    logger.warning(f"SolSniffer API returned invalid score format: {data}")
             else:
-                logger.debug(f"SolSniffer API returned status {resp.status_code}")
+                logger.warning(f"SolSniffer API returned status {resp.status_code}")
 
         except Exception as e:
             logger.debug(f"Error fetching SolSniffer score: {e}")
@@ -717,11 +717,12 @@ class DataFetcher:
                     if isinstance(tests, dict):
                         score = tests.get("score")
                 if score is not None and isinstance(score, (int, float)):
+                    logger.info(f"✅ TokenSniffer score fetched: {score}")
                     return float(score)
                 else:
-                    logger.debug(f"TokenSniffer API returned invalid score: {score}")
+                    logger.warning(f"TokenSniffer API returned invalid score format: {data}")
             else:
-                logger.debug(f"TokenSniffer API returned status {resp.status_code}")
+                logger.warning(f"TokenSniffer API returned status {resp.status_code}")
 
         except Exception as e:
             logger.debug(f"Error fetching TokenSniffer score: {e}")
