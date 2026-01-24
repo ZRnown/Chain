@@ -246,25 +246,28 @@ async def main():
             if basic_reasons:
                 logger.info(f"   Reasons: {', '.join(basic_reasons)}")
 
-            # 第二步：如果基础筛选通过且需要风险评分筛选，则获取风险评分
+            # 第二步：如果基础筛选通过，获取风险评分（用于显示和筛选）
             passed = basic_passed
             reasons = basic_reasons.copy()
 
-            if basic_passed and need_risk_check(filters_cfg):
+            if basic_passed:
+                # 总是获取风险评分（用于在推送消息中显示）
                 logger.info(f"🛡️ Basic filters passed, fetching risk scores...")
                 await fetcher.fetch_risk_scores(metrics)
                 logger.info(f"✅ Risk scores fetched: SolSniffer={metrics.sol_sniffer_score}, TokenSniffer={metrics.token_sniffer_score}")
 
-                # 应用风险评分筛选
-                risk_passed, risk_reasons = apply_risk_filters(metrics, filters_cfg)
-                logger.info(f"🔍 Risk filter check: {'✅ PASSED' if risk_passed else '❌ FAILED'}")
-                if risk_reasons:
-                    logger.info(f"   Reasons: {', '.join(risk_reasons)}")
-
-                passed = risk_passed
-                reasons.extend(risk_reasons)
-            elif not basic_passed:
-                logger.info(f"⏭️ Basic filters failed, skipping risk score fetch to save API calls")
+                # 只有设置了风险评分筛选条件时才进行筛选
+                if need_risk_check(filters_cfg):
+                    risk_passed, risk_reasons = apply_risk_filters(metrics, filters_cfg)
+                    logger.info(f"🔍 Risk filter check: {'✅ PASSED' if risk_passed else '❌ FAILED'}")
+                    if risk_reasons:
+                        logger.info(f"   Reasons: {', '.join(risk_reasons)}")
+                    passed = risk_passed
+                    reasons.extend(risk_reasons)
+                else:
+                    logger.info(f"⏭️ No risk filter configured, skipping risk filter check")
+            else:
+                logger.info(f"⏭️ Basic filters failed, skipping risk score fetch")
 
             elapsed = asyncio.get_event_loop().time() - start_time
             logger.info(f"⏱️  Total processing time: {elapsed:.2f}s")
