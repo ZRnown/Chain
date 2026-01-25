@@ -240,6 +240,12 @@ async def main():
             # 过滤检查（分两步：先基础筛选，通过后再获取风险评分并筛选）
             filters_cfg = await state.filters_cfg(task_id=task_id_in_use)
 
+            # 日志：显示风险评分筛选配置
+            logger.info(f"📋 Task [{task_id_in_use}] risk filter config: "
+                       f"SolSniffer={filters_cfg.sol_sniffer_score.min}-{filters_cfg.sol_sniffer_score.max}, "
+                       f"TokenSniffer={filters_cfg.token_sniffer_score.min}-{filters_cfg.token_sniffer_score.max}")
+            logger.info(f"📋 need_risk_check={need_risk_check(filters_cfg)}")
+
             # 第一步：基础筛选（不包含风险评分）
             basic_passed, basic_reasons = apply_basic_filters(metrics, filters_cfg)
             logger.info(f"🔍 Basic filter check: {'✅ PASSED' if basic_passed else '❌ FAILED'}")

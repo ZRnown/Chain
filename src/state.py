@@ -103,9 +103,15 @@ class StateStore:
                 else:
                     self._state["api_keys"].setdefault("sol_sniffer", None)
                     self._state["api_keys"].setdefault("token_sniffer", None)
+                # 迁移完成后立即保存，确保新字段持久化
+                self._sync_write()
             except Exception:
                 # ignore corrupt state; keep defaults
                 pass
+
+    def _sync_write(self):
+        """同步写入状态文件（用于初始化时）"""
+        self.path.write_text(json.dumps(self._state, indent=2))
 
     async def _write(self):
         self.path.write_text(json.dumps(self._state, indent=2))
