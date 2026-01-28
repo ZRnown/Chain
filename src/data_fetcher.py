@@ -657,12 +657,14 @@ class DataFetcher:
                 token_data = data.get("tokenData", {})
                 score = token_data.get("score")
                 if score is not None and isinstance(score, (int, float)):
-                    logger.info(f"✅ SolSniffer score fetched: {score}")
+                    logger.info(f"✅ SolSniffer score fetched: {score} (token={address[:8]}...)")
                     return float(score)
                 else:
-                    logger.warning(f"SolSniffer API returned invalid score format: {data}")
+                    logger.warning(f"⚠️ SolSniffer API invalid response | token={address[:8]}... | data={str(data)[:200]}")
             else:
-                logger.warning(f"SolSniffer API returned status {resp.status_code}")
+                # 详细显示失败信息
+                key_hint = f"{api_key[:8]}...{api_key[-4:]}" if api_key and len(api_key) > 12 else "default"
+                logger.warning(f"⚠️ SolSniffer API failed | status={resp.status_code} | token={address[:8]}... | key={key_hint} | resp={resp.text[:100]}")
 
         except Exception as e:
             logger.debug(f"Error fetching SolSniffer score: {e}")
@@ -670,21 +672,20 @@ class DataFetcher:
         return None
 
     async def _fetch_token_sniffer_score(self, chain: str, address: str) -> Optional[float]:
-        """获取 TokenSniffer 风险评分 (0-100)"""
+        """获取 TokenSniffer 风险评分 (0-100) - 仅支持 EVM 链"""
         try:
-            # 根据链类型确定 TokenSniffer 的 chain_id
+            # TokenSniffer 只支持 EVM 链，不支持 Solana
             token_sniffer_chain_map = {
-                "solana": 1399811149,  # Solana chain ID in TokenSniffer
                 "bsc": 56,            # BSC chain ID
                 "ethereum": 1,        # Ethereum chain ID
+                "eth": 1,
                 "polygon": 137,       # Polygon chain ID
                 "matic": 137,
-                # 添加其他支持的链
             }
 
             sniffer_chain_id = token_sniffer_chain_map.get(chain.lower())
             if sniffer_chain_id is None:
-                logger.debug(f"TokenSniffer does not support chain: {chain}")
+                logger.debug(f"TokenSniffer does not support chain: {chain} (only EVM chains supported)")
                 return None
 
             # 获取 API key（优先从 state 获取，否则使用默认值）
@@ -717,12 +718,14 @@ class DataFetcher:
                     if isinstance(tests, dict):
                         score = tests.get("score")
                 if score is not None and isinstance(score, (int, float)):
-                    logger.info(f"✅ TokenSniffer score fetched: {score}")
+                    logger.info(f"✅ TokenSniffer score fetched: {score} (chain={chain}, token={address[:8]}...)")
                     return float(score)
                 else:
-                    logger.warning(f"TokenSniffer API returned invalid score format: {data}")
+                    logger.warning(f"⚠️ TokenSniffer API invalid response | chain={chain} | token={address[:8]}... | data={str(data)[:200]}")
             else:
-                logger.warning(f"TokenSniffer API returned status {resp.status_code}")
+                # 详细显示失败信息
+                key_hint = f"{api_key[:8]}...{api_key[-4:]}" if api_key and len(api_key) > 12 else "default"
+                logger.warning(f"⚠️ TokenSniffer API failed | status={resp.status_code} | chain={chain} | token={address[:8]}... | key={key_hint} | resp={resp.text[:100]}")
 
         except Exception as e:
             logger.debug(f"Error fetching TokenSniffer score: {e}")

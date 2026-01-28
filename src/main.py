@@ -415,7 +415,7 @@ async def main():
                     if not text:
                         return
 
-                    logger.info(f"📨 [MTProto:{_client_name}] Incoming message in chat {chat_id}: {text[:80]!r}")
+                    logger.debug(f"📨 [MTProto:{_client_name}] Incoming message in chat {chat_id}: {text[:80]!r}")
 
                     # 根据任务配置中的 listen_chats 过滤需要处理的任务
                     snap = await state.snapshot()
@@ -459,7 +459,7 @@ async def main():
                     if not matched_tasks:
                         return
 
-                    logger.info(f"📨 [MTProto:{_client_name}] Message received from chat {chat_id} for tasks: {matched_tasks}")
+                    logger.debug(f"📨 [MTProto:{_client_name}] Message received from chat {chat_id} for tasks: {matched_tasks}")
                     found = set(CA_PATTERN.findall(text))
                     if not found:
                         return
