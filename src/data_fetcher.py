@@ -673,35 +673,33 @@ class DataFetcher:
         return None
 
     async def _fetch_token_sniffer_score(self, chain: str, address: str) -> Optional[float]:
-        """获取 TokenSniffer 风险评分 (0-100) - 仅支持 EVM 链"""
+        """获取 TokenSniffer 风险评分 (0-100)"""
         try:
-            # TokenSniffer 只支持 EVM 链，不支持 Solana
+            # TokenSniffer chain ID 映射
             token_sniffer_chain_map = {
-                "bsc": 56,            # BSC chain ID
-                "ethereum": 1,        # Ethereum chain ID
+                "bsc": 56,
+                "ethereum": 1,
                 "eth": 1,
-                "polygon": 137,       # Polygon chain ID
+                "polygon": 137,
                 "matic": 137,
+                "solana": "solana",  # 尝试调用，让 API 返回真实错误
+                "sol": "solana",
             }
 
-            sniffer_chain_id = token_sniffer_chain_map.get(chain.lower())
-            if sniffer_chain_id is None:
-                logger.info(f"⚠️ TokenSniffer API: chain={chain} 不支持 (仅支持 BSC/ETH/Polygon)")
-                return None
+            sniffer_chain_id = token_sniffer_chain_map.get(chain.lower(), chain.lower())
 
-            # 获取 API key（优先从 state 获取，否则使用默认值）
+            # 获取 API key
             api_key = None
             if self._get_api_key:
                 api_key = await self._get_api_key("token_sniffer")
             if not api_key:
                 api_key = DEFAULT_TOKEN_SNIFFER_API_KEY
             if not api_key:
-                logger.debug("TokenSniffer API key not configured")
+                logger.warning("⚠️ TokenSniffer API key not configured")
                 return None
 
             url = f"https://tokensniffer.com/api/v2/tokens/{sniffer_chain_id}/{address}"
 
-            # 使用 httpx 客户端请求
             params = {
                 "apikey": api_key,
                 "include_metrics": "true",
