@@ -632,7 +632,7 @@ class DataFetcher:
         """获取 SolSniffer 风险评分 (0-100)"""
         try:
             if chain.lower() not in ("sol", "solana"):
-                logger.info(f"ℹ️ SolSniffer skipped: chain={chain} not supported (only Solana)")
+                logger.debug(f"SolSniffer: chain={chain} not supported")
                 return None
 
             # 获取 API key（优先从 state 获取，否则使用默认值）
@@ -686,7 +686,7 @@ class DataFetcher:
 
             sniffer_chain_id = token_sniffer_chain_map.get(chain.lower())
             if sniffer_chain_id is None:
-                logger.info(f"ℹ️ TokenSniffer skipped: chain={chain} not supported (only BSC/ETH/Polygon)")
+                logger.debug(f"TokenSniffer: chain={chain} not supported")
                 return None
 
             # 获取 API key（优先从 state 获取，否则使用默认值）
