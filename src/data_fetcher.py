@@ -686,7 +686,7 @@ class DataFetcher:
 
             sniffer_chain_id = token_sniffer_chain_map.get(chain.lower())
             if sniffer_chain_id is None:
-                logger.debug(f"TokenSniffer: chain={chain} not supported")
+                logger.info(f"⚠️ TokenSniffer API: chain={chain} 不支持 (仅支持 BSC/ETH/Polygon)")
                 return None
 
             # 获取 API key（优先从 state 获取，否则使用默认值）
