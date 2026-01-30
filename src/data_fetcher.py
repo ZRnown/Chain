@@ -708,6 +708,14 @@ class DataFetcher:
 
             if resp.status_code == 200:
                 data = resp.json()
+
+                # 检查是否是 pending 状态（代币正在分析中）
+                status = data.get("status")
+                if status == "pending":
+                    logger.info(f"⏳ TokenSniffer API: token={address[:8]}... 正在分析中 (status=pending)")
+                    return None
+
+                # 尝试获取评分
                 metrics = data.get("metrics") or data.get("data", {}).get("metrics", {})
                 score = None
                 if isinstance(metrics, dict):
@@ -720,7 +728,7 @@ class DataFetcher:
                     logger.info(f"✅ TokenSniffer score fetched: {score} (chain={chain}, token={address[:8]}...)")
                     return float(score)
                 else:
-                    logger.warning(f"⚠️ TokenSniffer API invalid response | chain={chain} | token={address[:8]}... | data={str(data)[:200]}")
+                    logger.warning(f"⚠️ TokenSniffer API: 无评分数据 | chain={chain} | token={address[:8]}... | status={status} | data={str(data)[:150]}")
             else:
                 # 详细显示失败信息
                 key_hint = f"{api_key[:8]}...{api_key[-4:]}" if api_key and len(api_key) > 12 else "default"
