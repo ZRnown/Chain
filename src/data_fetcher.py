@@ -704,35 +704,48 @@ class DataFetcher:
                 "apikey": api_key,
                 "include_metrics": "true",
             }
-            resp = await self.client.get(url, params=params, timeout=10)
 
-            if resp.status_code == 200:
-                data = resp.json()
+            # pending 状态重试配置
+            max_retries = 6  # 最多重试 6 次
+            retry_interval = 5  # 每次等待 5 秒
 
-                # 检查是否是 pending 状态（代币正在分析中）
-                status = data.get("status")
-                if status == "pending":
-                    logger.info(f"⏳ TokenSniffer API: token={address[:8]}... 正在分析中 (status=pending)")
-                    return None
+            for attempt in range(max_retries + 1):
+                resp = await self.client.get(url, params=params, timeout=10)
 
-                # 尝试获取评分
-                metrics = data.get("metrics") or data.get("data", {}).get("metrics", {})
-                score = None
-                if isinstance(metrics, dict):
-                    score = metrics.get("score")
-                if score is None:
-                    tests = data.get("tests", {})
-                    if isinstance(tests, dict):
-                        score = tests.get("score")
-                if score is not None and isinstance(score, (int, float)):
-                    logger.info(f"✅ TokenSniffer score fetched: {score} (chain={chain}, token={address[:8]}...)")
-                    return float(score)
+                if resp.status_code == 200:
+                    data = resp.json()
+
+                    # 检查是否是 pending 状态（代币正在分析中）
+                    status = data.get("status")
+                    if status == "pending":
+                        if attempt < max_retries:
+                            logger.info(f"⏳ TokenSniffer API: token={address[:8]}... 正在分析中，{retry_interval}秒后重试 ({attempt + 1}/{max_retries})")
+                            await asyncio.sleep(retry_interval)
+                            continue
+                        else:
+                            logger.warning(f"⚠️ TokenSniffer API: token={address[:8]}... 分析超时，已重试{max_retries}次")
+                            return None
+
+                    # 尝试获取评分
+                    metrics = data.get("metrics") or data.get("data", {}).get("metrics", {})
+                    score = None
+                    if isinstance(metrics, dict):
+                        score = metrics.get("score")
+                    if score is None:
+                        tests = data.get("tests", {})
+                        if isinstance(tests, dict):
+                            score = tests.get("score")
+                    if score is not None and isinstance(score, (int, float)):
+                        logger.info(f"✅ TokenSniffer score fetched: {score} (chain={chain}, token={address[:8]}...)")
+                        return float(score)
+                    else:
+                        logger.warning(f"⚠️ TokenSniffer API: 无评分数据 | chain={chain} | token={address[:8]}... | status={status} | data={str(data)[:150]}")
+                        return None
                 else:
-                    logger.warning(f"⚠️ TokenSniffer API: 无评分数据 | chain={chain} | token={address[:8]}... | status={status} | data={str(data)[:150]}")
-            else:
-                # 详细显示失败信息
-                key_hint = f"{api_key[:8]}...{api_key[-4:]}" if api_key and len(api_key) > 12 else "default"
-                logger.warning(f"⚠️ TokenSniffer API failed | status={resp.status_code} | chain={chain} | token={address[:8]}... | key={key_hint} | resp={resp.text[:100]}")
+                    # 详细显示失败信息
+                    key_hint = f"{api_key[:8]}...{api_key[-4:]}" if api_key and len(api_key) > 12 else "default"
+                    logger.warning(f"⚠️ TokenSniffer API failed | status={resp.status_code} | chain={chain} | token={address[:8]}... | key={key_hint} | resp={resp.text[:100]}")
+                    return None
 
         except Exception as e:
             logger.debug(f"Error fetching TokenSniffer score: {e}")
