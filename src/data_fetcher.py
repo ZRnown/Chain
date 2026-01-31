@@ -726,11 +726,14 @@ class DataFetcher:
                             logger.warning(f"⚠️ TokenSniffer API: token={address[:8]}... 分析超时，已重试{max_retries}次")
                             return None
 
-                    # 尝试获取评分
-                    metrics = data.get("metrics") or data.get("data", {}).get("metrics", {})
-                    score = None
-                    if isinstance(metrics, dict):
-                        score = metrics.get("score")
+                    # 尝试获取评分 - 先检查顶层，再检查 metrics 和 tests
+                    score = data.get("score")  # 顶层 score 字段
+
+                    if score is None:
+                        metrics = data.get("metrics") or data.get("data", {}).get("metrics", {})
+                        if isinstance(metrics, dict):
+                            score = metrics.get("score")
+
                     if score is None:
                         tests = data.get("tests", {})
                         if isinstance(tests, dict):
