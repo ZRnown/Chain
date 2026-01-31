@@ -739,7 +739,10 @@ class DataFetcher:
                         logger.info(f"✅ TokenSniffer score fetched: {score} (chain={chain}, token={address[:8]}...)")
                         return float(score)
                     else:
-                        logger.warning(f"⚠️ TokenSniffer API: 无评分数据 | chain={chain} | token={address[:8]}... | status={status} | data={str(data)[:150]}")
+                        # 显示完整的返回数据用于调试
+                        import json
+                        logger.warning(f"⚠️ TokenSniffer API: 无评分数据 | chain={chain} | token={address[:8]}... | status={status}")
+                        logger.warning(f"   完整返回: {json.dumps(data, ensure_ascii=False)}")
                         return None
                 else:
                     # 详细显示失败信息
