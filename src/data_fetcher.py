@@ -19,8 +19,8 @@ logger = logging.getLogger("ca_filter_bot.data_fetcher")
 
 DEX_TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens/{address}"
 # 默认 API Key（如果 state 中没有设置，则使用这些默认值）
-DEFAULT_SOL_SNIFFER_API_KEY = "gbnyroq3tsblgsm8c9nofinecwmecd"
-DEFAULT_TOKEN_SNIFFER_API_KEY = "d69930b10c2b535db46463568fcfa38a7d9c5e95"
+DEFAULT_SOL_SNIFFER_API_KEY = None  # 不使用默认 key，必须手动设置
+DEFAULT_TOKEN_SNIFFER_API_KEY = None
 
 
 class DataFetcher:
