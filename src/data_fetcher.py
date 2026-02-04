@@ -617,13 +617,24 @@ class DataFetcher:
         # 简化版单独获取 - 如果主接口失败，这里也失败
         return None, None
 
-    async def fetch_risk_scores(self, metrics: TokenMetrics) -> None:
-        """获取 SolSniffer 和 TokenSniffer 风险评分（公开方法，供外部调用）"""
-        # 并行获取两个评分
-        sol_task = self._fetch_sol_sniffer_score(metrics.chain, metrics.address)
-        token_task = self._fetch_token_sniffer_score(metrics.chain, metrics.address)
+    async def fetch_risk_scores(self, metrics: TokenMetrics, fetch_sol: bool = True, fetch_token: bool = True) -> None:
+        """获取风险评分（根据参数决定调用哪个 API）"""
+        sol_score = None
+        token_score = None
 
-        sol_score, token_score = await asyncio.gather(sol_task, token_task)
+        tasks = []
+        if fetch_sol:
+            tasks.append(("sol", self._fetch_sol_sniffer_score(metrics.chain, metrics.address)))
+        if fetch_token:
+            tasks.append(("token", self._fetch_token_sniffer_score(metrics.chain, metrics.address)))
+
+        if tasks:
+            results = await asyncio.gather(*[t[1] for t in tasks])
+            for i, (name, _) in enumerate(tasks):
+                if name == "sol":
+                    sol_score = results[i]
+                elif name == "token":
+                    token_score = results[i]
 
         metrics.sol_sniffer_score = sol_score
         metrics.token_sniffer_score = token_score

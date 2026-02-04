@@ -259,8 +259,11 @@ async def main():
             if basic_passed:
                 # 只有设置了风险评分筛选条件时才获取风险评分并进行筛选
                 if need_risk_check(filters_cfg):
-                    logger.info(f"🛡️ Risk filter configured, fetching risk scores...")
-                    await fetcher.fetch_risk_scores(metrics)
+                    # 根据筛选配置决定调用哪个 API
+                    fetch_sol = filters_cfg.sol_sniffer_score.is_set()
+                    fetch_token = filters_cfg.token_sniffer_score.is_set()
+                    logger.info(f"🛡️ Risk filter configured (SolSniffer={fetch_sol}, TokenSniffer={fetch_token})")
+                    await fetcher.fetch_risk_scores(metrics, fetch_sol=fetch_sol, fetch_token=fetch_token)
                     logger.info(f"✅ Risk scores fetched: SolSniffer={metrics.sol_sniffer_score}, TokenSniffer={metrics.token_sniffer_score}")
 
                     risk_passed, risk_reasons = apply_risk_filters(metrics, filters_cfg)
