@@ -646,7 +646,7 @@ class DataFetcher:
                 logger.debug(f"SolSniffer: chain={chain} not supported")
                 return None
 
-            # 获取 API key（优先从 state 获取，否则使用默认值）
+            # 获取 API key
             api_key = None
             if self._get_api_key:
                 api_key = await self._get_api_key("sol_sniffer")
@@ -656,27 +656,42 @@ class DataFetcher:
                 logger.warning("⚠️ SolSniffer API key not configured")
                 return None
 
-            # SolSniffer API v2.0 端点：GET /token/{address}
             url = f"https://solsniffer.com/api/v2/token/{address}"
-
-            # 使用 httpx 客户端请求，API key 作为 Header
             headers = {"X-API-KEY": api_key}
-            resp = await self.client.get(url, headers=headers, timeout=10)
 
-            if resp.status_code == 200:
-                data = resp.json()
-                # 根据API文档，返回格式为 tokenData.score
-                token_data = data.get("tokenData", {})
-                score = token_data.get("score")
-                if score is not None and isinstance(score, (int, float)):
-                    logger.info(f"✅ SolSniffer score fetched: {score} (token={address[:8]}...)")
-                    return float(score)
+            # 重试配置
+            max_retries = 6
+            retry_interval = 5
+
+            for attempt in range(max_retries + 1):
+                resp = await self.client.get(url, headers=headers, timeout=10)
+
+                if resp.status_code == 200:
+                    data = resp.json()
+                    token_data = data.get("tokenData", {})
+                    score = token_data.get("score")
+                    if score is not None and isinstance(score, (int, float)):
+                        logger.info(f"✅ SolSniffer score fetched: {score} (token={address[:8]}...)")
+                        return float(score)
+                    else:
+                        # 无评分数据，显示完整返回
+                        import json
+                        logger.warning(f"⚠️ SolSniffer API: 无评分数据 | token={address[:8]}...")
+                        logger.warning(f"   完整返回: {json.dumps(data, ensure_ascii=False)[:300]}")
+                        return None
+                elif resp.status_code == 201:
+                    # 201 表示正在分析中，需要重试
+                    if attempt < max_retries:
+                        logger.info(f"⏳ SolSniffer API: token={address[:8]}... 正在分析中，{retry_interval}秒后重试 ({attempt + 1}/{max_retries})")
+                        await asyncio.sleep(retry_interval)
+                        continue
+                    else:
+                        logger.warning(f"⚠️ SolSniffer API: token={address[:8]}... 分析超时，已重试{max_retries}次")
+                        return None
                 else:
-                    logger.warning(f"⚠️ SolSniffer API invalid response | token={address[:8]}... | data={str(data)[:200]}")
-            else:
-                # 详细显示失败信息
-                key_hint = f"{api_key[:8]}...{api_key[-4:]}" if api_key and len(api_key) > 12 else "default"
-                logger.warning(f"⚠️ SolSniffer API failed | status={resp.status_code} | token={address[:8]}... | key={key_hint} | resp={resp.text[:100]}")
+                    key_hint = f"{api_key[:8]}...{api_key[-4:]}" if api_key and len(api_key) > 12 else "default"
+                    logger.warning(f"⚠️ SolSniffer API failed | status={resp.status_code} | token={address[:8]}... | key={key_hint} | resp={resp.text[:100]}")
+                    return None
 
         except Exception as e:
             logger.debug(f"Error fetching SolSniffer score: {e}")
